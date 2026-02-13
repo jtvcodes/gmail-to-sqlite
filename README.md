@@ -1,5 +1,7 @@
 # Gmail to SQLite
 
+![Header](images/header.png)
+
 A robust Python application that syncs Gmail messages to a local SQLite database for analysis and archival purposes.
 
 ## Features
