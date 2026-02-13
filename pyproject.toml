@@ -3,27 +3,27 @@ name = "gmail-to-sqlite"
 version = "0.2.0"
 description = "A robust Python application that syncs Gmail messages to a local SQLite database for analysis and archival purposes."
 readme = "README.md"
-requires-python = ">=3.8.1"
+requires-python = ">=3.9"
 license = { file = "LICENSE" }
 keywords = ["gmail", "sqlite", "email", "sync", "backup", "archive"]
 
 dependencies = [
-    "beautifulsoup4>=4.12.0",
-    "google-api-python-client>=2.100.0",
-    "google-auth>=2.20.0",
-    "google-auth-oauthlib>=1.0.0",
+    "beautifulsoup4>=4.13.3",
+    "google-api-python-client>=2.164.0",
+    "google-auth>=2.38.0",
+    "google-auth-oauthlib>=1.2.1",
     "google-auth-httplib2>=0.2.0",
-    "peewee>=3.15.0",
+    "peewee>=3.17.9",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "black>=23.0.0",
-    "flake8>=6.0.0",
-    "mypy>=1.0.0",
-    "pytest>=7.0.0",
-    "pytest-cov>=4.0.0",
-    "pre-commit>=3.0.0",
+    "black>=25.1.0",
+    "flake8>=7.1.2",
+    "mypy>=1.15.0",
+    "pytest>=8.3.5",
+    "pytest-cov>=6.0.0",
+    "pre-commit>=4.1.0",
 ]
 
 [project.urls]
@@ -44,7 +44,7 @@ packages = ["gmail_to_sqlite"]
 
 [tool.black]
 line-length = 88
-target-version = ['py38']
+target-version = ['py39']
 include = '\.pyi?$'
 extend-exclude = '''
 /(
@@ -60,7 +60,7 @@ extend-exclude = '''
 '''
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.9"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
@@ -73,6 +73,7 @@ warn_unused_ignores = true
 warn_no_return = true
 warn_unreachable = true
 strict_equality = true
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
