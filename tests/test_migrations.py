@@ -1,6 +1,5 @@
 """Tests for database migrations functionality."""
 
-import pytest
 import tempfile
 import os
 from gmail_to_sqlite.db import database_proxy, SchemaVersion, Message

@@ -6,12 +6,8 @@ when new features are added or existing schema needs to be modified.
 """
 
 import logging
-from typing import Optional
 
-from peewee import BooleanField, SQL
-from playhouse.migrate import SqliteMigrator, migrate
-
-from .db import database_proxy, Message, SchemaVersion
+from .db import database_proxy, SchemaVersion
 
 
 logger = logging.getLogger(__name__)

@@ -1,6 +1,5 @@
 """Tests for database functionality."""
 
-import pytest
 from gmail_to_sqlite.db import init, Message
 
 

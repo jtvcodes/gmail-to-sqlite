@@ -3,7 +3,7 @@ import logging
 import os
 import signal
 import sys
-from typing import Any, Callable, List, Optional
+from typing import Any, List, Optional
 
 from . import auth, db, sync
 from .constants import DEFAULT_WORKERS, LOG_FORMAT

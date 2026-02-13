@@ -23,7 +23,7 @@ def get_credentials(data_dir: str) -> Any:
         data_dir (str): The path where to store data.
 
     Returns:
-        Any: The authentication credentials (compatible with Google API clients).
+        Credentials: The authentication credentials for Google API clients.
 
     Raises:
         AuthenticationError: If credentials cannot be obtained or are invalid.
@@ -61,10 +61,14 @@ def get_credentials(data_dir: str) -> Any:
             except Exception as e:
                 raise AuthenticationError(f"Failed to obtain new credentials: {e}")
 
-        # Save credentials for future use
+        # Save credentials for future use with secure permissions
         if creds:
             try:
-                with open(token_file_path, "w") as token:
+                with open(
+                    token_file_path,
+                    "w",
+                    opener=lambda path, flags: os.open(path, flags, 0o600),
+                ) as token:
                     token.write(creds.to_json())
             except Exception as e:
                 raise AuthenticationError(f"Failed to save credentials: {e}")

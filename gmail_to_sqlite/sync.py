@@ -6,12 +6,11 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+from googleapiclient.errors import HttpError, Error as GoogleApiError
 from peewee import IntegrityError
 
 from . import db, message
 from .constants import (
-    DEFAULT_WORKERS,
     GMAIL_API_VERSION,
     MAX_RESULTS_PER_PAGE,
     MAX_RETRY_ATTEMPTS,
@@ -148,7 +147,7 @@ def get_labels(service: Any) -> Dict[str, str]:
         for label in response.get("labels", []):
             labels[label["id"]] = label["name"]
         return labels
-    except Exception as e:
+    except (HttpError, GoogleApiError) as e:
         raise SyncError(f"Failed to retrieve labels: {e}")
 
 
@@ -394,7 +393,7 @@ def all_messages(
             }
 
             for future in concurrent.futures.as_completed(future_to_id):
-                if check_shutdown and check_shutdown() and not future.running():
+                if check_shutdown and check_shutdown():
                     continue
 
                 message_id = future_to_id[future]
@@ -426,13 +425,14 @@ def all_messages(
                 f"Total messages successfully synced: {total_synced_count} out of {len(all_message_ids)}"
             )
         return total_synced_count
-    finally:
-        pass
+    except Exception as e:
+        logging.error(f"Unexpected error during sync: {e}")
+        raise SyncError(f"Sync failed: {e}") from e
 
 
 def sync_deleted_messages(
     credentials: Any, check_shutdown: Optional[Callable[[], bool]] = None
-) -> None:
+) -> Optional[int]:
     """
     Compares message IDs in Gmail with those in the database and marks missing messages as deleted.
     This function only updates the is_deleted flag and doesn't download full message content.
@@ -457,7 +457,7 @@ def sync_deleted_messages(
             )
             return None
 
-        _detect_and_mark_deleted_messages(gmail_message_ids, check_shutdown)
+        return _detect_and_mark_deleted_messages(gmail_message_ids, check_shutdown)
     except Exception as e:
         logging.error(f"Error during deletion sync: {str(e)}")
         return None
@@ -487,31 +487,26 @@ def single_message(
             logging.info("Shutdown requested. Exiting gracefully.")
             return None
 
-        try:
-            msg = _fetch_message(
-                service,
-                message_id,
-                labels,
-                check_interrupt=check_shutdown,
-            )
-            if check_shutdown and check_shutdown():
-                logging.info(
-                    "Shutdown requested after message fetch. Exiting gracefully."
-                )
-                return None
+        msg = _fetch_message(
+            service,
+            message_id,
+            labels,
+            check_interrupt=check_shutdown,
+        )
+        if check_shutdown and check_shutdown():
+            logging.info("Shutdown requested after message fetch. Exiting gracefully.")
+            return None
 
-            try:
-                db.create_message(msg)
-                logging.info(
-                    f"Successfully synced message {msg.id} (Original ID: {message_id}) from {msg.timestamp}"
-                )
-            except IntegrityError as e:
-                logging.error(
-                    f"Could not process message {message_id} due to integrity error: {str(e)}"
-                )
-        except InterruptedError:
-            logging.info(f"Message fetch for {message_id} was interrupted")
-        except Exception as e:
-            logging.error(f"Failed to fetch message {message_id}: {str(e)}")
-    finally:
-        pass
+        try:
+            db.create_message(msg)
+            logging.info(
+                f"Successfully synced message {msg.id} (Original ID: {message_id}) from {msg.timestamp}"
+            )
+        except IntegrityError as e:
+            logging.error(
+                f"Could not process message {message_id} due to integrity error: {str(e)}"
+            )
+    except InterruptedError:
+        logging.info(f"Message fetch for {message_id} was interrupted")
+    except Exception as e:
+        logging.error(f"Failed to fetch message {message_id}: {str(e)}")

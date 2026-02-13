@@ -58,7 +58,7 @@ class Message(Model):
         size (IntegerField): The size of the message.
         timestamp (DateTimeField): The timestamp of the message.
         is_read (BooleanField): Indicates whether the message has been read.
-        is_outgoing BooleanField(): Indicates whether the message was sent by the user.
+        is_outgoing (BooleanField): Indicates whether the message was sent by the user.
         is_deleted (BooleanField): Indicates whether the message has been deleted from Gmail.
         last_indexed (DateTimeField): The timestamp when the message was last indexed.
 
@@ -206,9 +206,6 @@ def mark_messages_as_deleted(message_ids: List[str]) -> None:
         return
 
     try:
-        if not message_ids:
-            return
-
         # Use the SQL IN clause with proper parameter binding
         batch_size = 100
         for i in range(0, len(message_ids), batch_size):
@@ -251,7 +248,7 @@ def get_deleted_message_ids() -> List[str]:
         return [
             message.message_id
             for message in Message.select(Message.message_id).where(
-                Message.is_deleted == True
+                Message.is_deleted == True  # noqa: E712
             )
         ]
     except Exception as e:
