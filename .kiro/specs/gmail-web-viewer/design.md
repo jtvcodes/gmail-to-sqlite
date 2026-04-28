@@ -11,9 +11,10 @@ All new code lives under `web/` at the workspace root. The backend is started wi
 
 ### Goals
 
-- Zero new infrastructure — reuse the existing `messages` table and Peewee models from `gmail_to_sqlite/db.py`.
+- Zero new infrastructure — query the existing `messages` table directly via Python's built-in `sqlite3` module; no dependency on root package code.
 - Single process — Flask serves both the API and the static files.
-- Minimal dependencies — Flask (+ flask-cors for dev convenience) added to `pyproject.toml`; no JS build step.
+- Self-contained under `web/` — all new Python, JS, CSS, and test files live exclusively under `web/`; nothing in the workspace root is created or modified.
+- Minimal dependencies — Flask (+ flask-cors for dev convenience) declared in `web/requirements.txt`; no JS build step.
 
 ---
 
@@ -27,7 +28,7 @@ graph TD
 
     Browser -- "GET /api/messages\nGET /api/messages/:id\nGET /api/labels" --> Flask
     Browser -- "GET / (static files)" --> Flask
-    Flask -- "Peewee ORM queries" --> DB
+    Flask -- "sqlite3 queries" --> DB
 ```
 
 The Flask process:
@@ -47,9 +48,16 @@ The Flask process:
 Responsibilities:
 - Parse CLI arguments (`--port`, `--db-path`).
 - Validate that the DB file exists; exit with error if not.
-- Initialize the Peewee database proxy (reusing `gmail_to_sqlite.db.init`).
+- Open a `sqlite3` connection and store the DB path in Flask app config for use by blueprints.
 - Register API blueprints and static file route.
 - Start the Flask development server.
+
+#### `web/db.py` — Database helper
+
+Responsibilities:
+- Provide `get_db()` — returns a `sqlite3.Connection` configured with `row_factory = sqlite3.Row` and `detect_types = PARSE_DECLTYPES`.
+- Provide `close_db()` — closes the connection after each request via Flask's `teardown_appcontext`.
+- All SQL queries use parameterised statements; no raw string interpolation.
 
 #### `web/api/messages.py` — Messages blueprint
 
@@ -127,7 +135,7 @@ Returns a JSON array of distinct label strings, sorted alphabetically, from non-
 
 ### Existing Database Schema (read-only)
 
-The backend reads from the existing `messages` table managed by `gmail_to_sqlite/db.py`. No schema changes are required.
+The backend reads from the existing `messages` table in `data/messages.db` via `sqlite3`. No schema changes are required.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -277,7 +285,7 @@ All API error responses use `Content-Type: application/json`.
 
 ### Unit Tests (pytest)
 
-Located in `tests/test_web_*.py`. Cover:
+Located in `web/tests/test_web_*.py`. Cover:
 
 - **Parameter validation**: invalid `page`, `page_size`, boolean coercion for `is_read` / `is_outgoing` / `include_deleted`.
 - **Query building**: each filter applied in isolation and in combination produces the correct SQL WHERE clause (tested against an in-memory SQLite DB seeded with fixture data).

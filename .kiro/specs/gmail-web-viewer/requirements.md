@@ -2,7 +2,7 @@
 
 ## Introduction
 
-A simple Single Page Application (SPA) for browsing Gmail messages stored in a local SQLite database (`data/messages.db`). The app consists of a lightweight Python backend (Flask or FastAPI) that exposes a REST API over the database, and a vanilla JS frontend that renders a message list with click-to-read and basic search/filter capabilities. The entire app lives under a new `web/` folder in the workspace root.
+A simple Single Page Application (SPA) for browsing Gmail messages stored in a local SQLite database (`data/messages.db`). The app consists of a lightweight Python backend (Flask) that exposes a REST API over the database, and a vanilla JS frontend that renders a message list with click-to-read and basic search/filter capabilities. The entire app lives under a new `web/` folder in the workspace root — no files outside of `web/` or `data/` are created or modified.
 
 ## Glossary
 

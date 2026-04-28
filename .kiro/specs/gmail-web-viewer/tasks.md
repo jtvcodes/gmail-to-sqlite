@@ -6,23 +6,24 @@ Build a Flask-backed SPA that reads from the existing `data/messages.db` SQLite 
 
 ## Tasks
 
-- [ ] 1. Update project dependencies and create the `web/` directory structure
-  - Add `flask` and `flask-cors` to the `[project.dependencies]` list in `pyproject.toml`
-  - Add `hypothesis` to `[project.optional-dependencies] dev`
-  - Create the directory skeleton: `web/`, `web/api/`, `web/static/`
-  - Create empty placeholder files: `web/api/__init__.py`, `web/api/messages.py`, `web/api/labels.py`, `web/server.py`
+- [x] 1. Create the `web/` directory structure and declare dependencies
+  - Create `web/requirements.txt` with `flask` and `flask-cors`
+  - Create `web/requirements-dev.txt` with `pytest`, `pytest-flask`, and `hypothesis`
+  - Create the directory skeleton: `web/api/`, `web/static/`, `web/tests/`
+  - Create empty placeholder files: `web/api/__init__.py`, `web/api/messages.py`, `web/api/labels.py`, `web/db.py`, `web/server.py`, `web/tests/__init__.py`
   - _Requirements: 1.1, 1.2, 1.3_
 
-- [ ] 2. Implement the Flask server entry point (`web/server.py`)
-  - [ ] 2.1 Parse CLI arguments (`--port` defaulting to `8000`, `--db-path` defaulting to `data/messages.db`)
-  - [ ] 2.2 Validate that the DB file exists at startup; print a descriptive error to stderr and `sys.exit(1)` if not
-  - [ ] 2.3 Call `gmail_to_sqlite.db.init()` to initialise the Peewee database proxy
-  - [ ] 2.4 Register the messages and labels blueprints under `/api`
-  - [ ] 2.5 Serve `web/static/` as static files and route `GET /` to `index.html`
-  - [ ] 2.6 Start the Flask development server on the configured port
+- [-] 2. Implement the database helper and Flask server entry point
+  - [ ] 2.1 Implement `web/db.py`: `get_db()` opens a `sqlite3.Connection` (row_factory=sqlite3.Row) using the DB path stored in `app.config["DB_PATH"]`; `close_db()` tears it down after each request
+  - [ ] 2.2 Parse CLI arguments in `web/server.py` (`--port` defaulting to `8000`, `--db-path` defaulting to `data/messages.db`)
+  - [ ] 2.3 Validate that the DB file exists at startup; print a descriptive error to stderr and `sys.exit(1)` if not
+  - [ ] 2.4 Store DB path in `app.config["DB_PATH"]` and register `close_db` with `app.teardown_appcontext`
+  - [ ] 2.5 Register the messages and labels blueprints under `/api`
+  - [ ] 2.6 Serve `web/static/` as static files and route `GET /` to `index.html`
+  - [ ] 2.7 Start the Flask development server on the configured port
   - _Requirements: 1.1, 1.2, 1.3, 1.4_
 
-- [ ] 3. Implement the messages API blueprint (`web/api/messages.py`)
+- [~] 3. Implement the messages API blueprint (`web/api/messages.py`)
   - [ ] 3.1 Implement `GET /api/messages` with pagination (`page`, `page_size`), returning the response envelope `{messages, total, page, page_size}`
     - Validate `page` ≥ 1 and `page_size` in 1–200; return HTTP 400 on invalid values
     - Exclude `is_deleted=true` records by default; honour `include_deleted=true` when provided
@@ -36,96 +37,96 @@ Build a Flask-backed SPA that reads from the existing `data/messages.db` SQLite 
     - _Requirements: 3.3, 3.4_
   - [ ] 3.5 Implement `GET /api/messages/<message_id>` returning the full message record (summary fields + `recipients`, `body`); return HTTP 404 with `{"error": "Message not found"}` if absent
     - _Requirements: 4.1, 4.2_
-  - [ ]* 3.6 Write unit tests for `GET /api/messages` parameter validation and filter logic (`tests/test_web_messages.py`)
+  - [ ] 3.6 Write unit tests for `GET /api/messages` parameter validation and filter logic (`web/tests/test_web_messages.py`)
     - Test invalid `page` / `page_size` values return HTTP 400
     - Test each filter (`q`, `label`, `is_read`, `is_outgoing`, `include_deleted`) in isolation against a seeded in-memory DB
     - Test response envelope fields (`total`, `page`, `page_size`) are present and correct
     - _Requirements: 2.1–2.5, 3.1–3.4, 6.1, 7.3_
-  - [ ]* 3.7 Write unit tests for `GET /api/messages/<message_id>` (`tests/test_web_messages.py`)
+  - [ ] 3.7 Write unit tests for `GET /api/messages/<message_id>` (`web/tests/test_web_messages.py`)
     - Test 200 response with all required fields for an existing message
     - Test 404 response for a non-existent `message_id`
     - _Requirements: 4.1, 4.2_
 
-- [ ] 4. Implement the labels API blueprint (`web/api/labels.py`)
+- [~] 4. Implement the labels API blueprint (`web/api/labels.py`)
   - [ ] 4.1 Implement `GET /api/labels` — query distinct labels from non-deleted messages, flatten the JSON arrays, deduplicate, and return sorted alphabetically
     - _Requirements: 5.1_
-  - [ ]* 4.2 Write unit tests for `GET /api/labels` (`tests/test_web_labels.py`)
+  - [ ] 4.2 Write unit tests for `GET /api/labels` (`web/tests/test_web_labels.py`)
     - Test that only labels from non-deleted messages are returned
     - Test that the result is sorted alphabetically and deduplicated
     - _Requirements: 5.1_
 
-- [ ] 5. Checkpoint — Ensure all backend tests pass
-  - Run `pytest tests/test_web_messages.py tests/test_web_labels.py -v` and confirm all tests pass; resolve any failures before continuing.
+- [~] 5. Checkpoint — Ensure all backend tests pass
+  - Run `pytest web/tests/test_web_messages.py web/tests/test_web_labels.py -v` and confirm all tests pass; resolve any failures before continuing.
 
-- [ ] 6. Write property-based tests for the messages API (`tests/test_web_properties.py`)
-  - [ ]* 6.1 Write property test for pagination total consistency
+- [~] 6. Write property-based tests for the messages API (`web/tests/test_web_properties.py`)
+  - [ ] 6.1 Write property test for pagination total consistency
     - **Property 1: Pagination total consistency**
     - **Validates: Requirements 2.5**
     - Use `hypothesis` strategies to generate random filter combos; assert `total` equals a direct count query with the same filters
-  - [ ]* 6.2 Write property test for page size bounds
+  - [ ] 6.2 Write property test for page size bounds
     - **Property 2: Page size bounds**
     - **Validates: Requirements 2.2**
     - Generate random `page` and `page_size` values; assert `len(messages) <= page_size` and `len(messages) <= total`
-  - [ ]* 6.3 Write property test for search filter soundness
+  - [ ] 6.3 Write property test for search filter soundness
     - **Property 3: Search filter soundness**
     - **Validates: Requirements 3.1**
     - Generate random query strings and seeded message sets; assert every returned message contains the query in `subject`, `sender.name`, `sender.email`, or `body`
-  - [ ]* 6.4 Write property test for label filter soundness
+  - [ ] 6.4 Write property test for label filter soundness
     - **Property 4: Label filter soundness**
     - **Validates: Requirements 3.2**
     - Generate random label strings and seeded message sets; assert every returned message has that label in its `labels` array
-  - [ ]* 6.5 Write property test for boolean filter soundness
+  - [ ] 6.5 Write property test for boolean filter soundness
     - **Property 5: Boolean filter soundness**
     - **Validates: Requirements 3.3, 3.4**
     - Generate random `is_read` / `is_outgoing` boolean values and message sets; assert all returned messages match the filter
-  - [ ]* 6.6 Write property test for deleted messages excluded by default
+  - [ ] 6.6 Write property test for deleted messages excluded by default
     - **Property 6: Deleted messages excluded by default**
     - **Validates: Requirements 6.1**
     - Generate message sets with mixed `is_deleted` values; assert no returned message has `is_deleted=True` when `include_deleted` is not set
-  - [ ]* 6.7 Write property test for labels endpoint completeness
+  - [ ] 6.7 Write property test for labels endpoint completeness
     - **Property 7: Labels endpoint completeness**
     - **Validates: Requirements 5.1**
     - Generate random message sets; assert every label from non-deleted messages appears in `GET /api/labels` and the list is sorted
-  - [ ]* 6.8 Write property test for invalid pagination parameters rejected
+  - [ ] 6.8 Write property test for invalid pagination parameters rejected
     - **Property 8: Invalid pagination parameters rejected**
     - **Validates: Requirements 7.3**
     - Generate invalid `page` / `page_size` values (zero, negative, non-numeric strings); assert HTTP 400 is returned
 
-- [ ] 7. Checkpoint — Ensure all property tests pass
-  - Run `pytest tests/test_web_properties.py -v` and confirm all property tests pass; resolve any failures before continuing.
+- [~] 7. Checkpoint — Ensure all property tests pass
+  - Run `pytest web/tests/test_web_properties.py -v` and confirm all property tests pass; resolve any failures before continuing.
 
-- [ ] 8. Build the frontend shell (`web/static/index.html` and `web/static/style.css`)
+- [~] 8. Build the frontend shell (`web/static/index.html` and `web/static/style.css`)
   - [ ] 8.1 Create `web/static/index.html` with the page shell: header, filter bar placeholder, message list table placeholder, detail panel placeholder, and error banner placeholder; import `style.css`, `api.js`, `filters.js`, `messageList.js`, `messageDetail.js`, and `app.js`
     - _Requirements: 2.6, 3.5, 3.6, 4.3, 4.4, 4.5_
   - [ ] 8.2 Create `web/static/style.css` with minimal styles: table layout, unread/read row distinction, deleted message strikethrough/muted style, detail panel, error banner, and pagination controls
     - _Requirements: 2.6, 6.3_
 
-- [ ] 9. Implement the frontend API client (`web/static/api.js`)
+- [~] 9. Implement the frontend API client (`web/static/api.js`)
   - Implement `fetchMessages(params)` — builds query string from state params and calls `GET /api/messages`
   - Implement `fetchMessage(messageId)` — calls `GET /api/messages/{messageId}`
   - Implement `fetchLabels()` — calls `GET /api/labels`
   - On non-2xx responses, extract `error` from JSON body (or fall back to status text) and throw an `Error`; on network failure throw with the generic message
   - _Requirements: 2.1, 4.1, 5.2, 7.1_
 
-- [ ] 10. Implement the filters component (`web/static/filters.js`)
+- [~] 10. Implement the filters component (`web/static/filters.js`)
   - Render the search input field and wire its `submit` / `input` event to update `state.query` and call `state.onFilterChange()`
   - Render the label dropdown and populate it from `state.labels`; wire `change` event to update `state.label` and call `state.onFilterChange()`
   - Reset `state.page` to `1` whenever any filter changes
   - _Requirements: 3.5, 3.6, 3.7_
 
-- [ ] 11. Implement the message list component (`web/static/messageList.js`)
+- [~] 11. Implement the message list component (`web/static/messageList.js`)
   - Render the message table with columns: sender name/email, subject, date, read/unread indicator
   - Apply a CSS class for unread rows and a separate class for deleted rows (strikethrough/muted)
   - Render pagination controls (previous/next buttons and current page indicator); wire clicks to update `state.page` and re-fetch
   - Wire row clicks to call `state.onMessageSelect(messageId)`
   - _Requirements: 2.6, 2.7, 2.8, 6.3_
 
-- [ ] 12. Implement the message detail component (`web/static/messageDetail.js`)
+- [~] 12. Implement the message detail component (`web/static/messageDetail.js`)
   - Render the detail panel/modal showing: subject, sender name and email, recipient list (to, cc, bcc), date/time, labels, and body text
   - Render a close/dismiss button that clears `state.selectedMessage` and re-renders the list view
   - _Requirements: 4.3, 4.4, 4.5_
 
-- [ ] 13. Implement the app bootstrap and state management (`web/static/app.js`)
+- [~] 13. Implement the app bootstrap and state management (`web/static/app.js`)
   - Define the global `state` object matching the shape in the design document
   - Implement `loadMessages()` — calls `api.fetchMessages(state)`, updates `state.messages` / `state.total`, clears errors, and calls `messageList.render()`
   - Implement `loadLabels()` — calls `api.fetchLabels()`, updates `state.labels`, and calls `filters.render()`
@@ -136,8 +137,8 @@ Build a Flask-backed SPA that reads from the existing `data/messages.db` SQLite 
   - On `DOMContentLoaded`, call `loadLabels()` then `loadMessages()`
   - _Requirements: 2.8, 3.5, 3.6, 3.7, 4.3, 5.2, 7.1_
 
-- [ ] 14. Final checkpoint — Ensure all tests pass
-  - Run `pytest tests/ -v` and confirm the full test suite passes; resolve any failures before finishing.
+- [~] 14. Final checkpoint — Ensure all tests pass
+  - Run `pytest web/tests/ -v` and confirm the full test suite passes; resolve any failures before finishing.
 
 ## Notes
 
