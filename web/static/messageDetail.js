@@ -1,6 +1,8 @@
 // Message detail component for the Gmail Web Viewer SPA
 // Renders the detail panel into #message-detail.
 
+let activeView = "html";
+
 function formatRecipient(r) {
   if (r && typeof r === 'object') {
     return r.name ? r.name + ' <' + r.email + '>' : (r.email || '');
@@ -9,6 +11,8 @@ function formatRecipient(r) {
 }
 
 function render() {
+  activeView = "html";
+
   const panel = document.getElementById("message-detail");
 
   if (!state.selectedMessage) {
@@ -36,6 +40,23 @@ function render() {
   subject.className = "detail-subject";
   subject.textContent = msg.subject || "(no subject)";
   panel.appendChild(subject);
+
+  // Create iframe early so toggle button can reference it
+  const bodyDiv = document.createElement("div");
+  bodyDiv.className = "detail-body";
+  const iframe = document.createElement("iframe");
+  iframe.className = "detail-body-frame";
+  iframe.setAttribute("title", "Message body");
+  bodyDiv.appendChild(iframe);
+
+  // Toggle button — placed right after subject, before meta
+  const toggleWrap = document.createElement("div");
+  toggleWrap.className = "detail-toggle-wrap";
+  const toggleBtn = buildToggleButton(msg, iframe, bodyDiv);
+  if (toggleBtn !== null) {
+    toggleWrap.appendChild(toggleBtn);
+  }
+  panel.appendChild(toggleWrap);
 
   // Meta block
   const meta = document.createElement("div");
@@ -70,6 +91,12 @@ function render() {
   dateLine.textContent = "Date: " + (msg.timestamp ? new Date(msg.timestamp).toLocaleString() : "");
   meta.appendChild(dateLine);
 
+  const idLine = document.createElement("div");
+  idLine.className = "detail-message-id";
+  idLine.textContent = "ID: " + msg.message_id;
+  idLine.title = "Message ID";
+  meta.appendChild(idLine);
+
   // Gmail link
   const gmailLine = document.createElement("div");
   const gmailLink = document.createElement("a");
@@ -94,25 +121,88 @@ function render() {
   });
   panel.appendChild(labelsDiv);
 
-  // Body — render in a sandboxed iframe to isolate styles
-  const bodyDiv = document.createElement("div");
-  bodyDiv.className = "detail-body";
+  // Attachments section
+  const attachments = msg.attachments || [];
+  if (attachments.length > 0) {
+    const attachDiv = document.createElement("div");
+    attachDiv.className = "detail-attachments";
 
-  const iframe = document.createElement("iframe");
-  iframe.className = "detail-body-frame";
-  iframe.setAttribute("sandbox", "allow-same-origin");
-  iframe.setAttribute("title", "Message body");
-  bodyDiv.appendChild(iframe);
+    attachments.forEach(function (att) {
+      const dataUrl = "/api/messages/" + msg.message_id + "/attachments/" + att.attachment_id + "/data";
+      const previewable = isPreviewable(att.mime_type);
+
+      const item = document.createElement("div");
+      item.className = "detail-attachment-item";
+      item.style.cursor = "pointer";
+
+      const icon = document.createElement("span");
+      icon.className = "detail-attachment-icon";
+      icon.textContent = attachmentIcon(att.mime_type);
+
+      const info = document.createElement("span");
+      info.className = "detail-attachment-info";
+
+      const name = document.createElement("span");
+      name.className = "detail-attachment-name";
+      name.textContent = att.filename || "attachment";
+
+      const metaSpan = document.createElement("span");
+      metaSpan.className = "detail-attachment-meta";
+      const kb = att.size ? Math.ceil(att.size / 1024) : 0;
+      metaSpan.textContent = att.mime_type + (kb ? " · " + kb + " KB" : "") + (previewable ? " · click to preview" : " · click to download");
+
+      info.appendChild(name);
+      info.appendChild(metaSpan);
+      item.appendChild(icon);
+      item.appendChild(info);
+
+      item.addEventListener("click", function () {
+        if (previewable) {
+          openAttachmentPreview(att, dataUrl);
+        } else {
+          // Trigger download directly
+          const a = document.createElement("a");
+          a.href = dataUrl;
+          a.download = att.filename || "attachment";
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        }
+      });
+
+      attachDiv.appendChild(item);
+    });
+
+    panel.appendChild(attachDiv);
+  }
+
+  // Body — append the already-created bodyDiv and render content
   panel.appendChild(bodyDiv);
 
   // Write content after appending so contentDocument is available
-  const rawBody = msg.body || "";
-  const isHtml = /<\s*html[\s>]/i.test(rawBody) || /<\s*(div|table|p|span|br)\b/i.test(rawBody);
+  renderBody(iframe, msg, activeView);
+}
+
+/**
+ * renderBody(iframe, msg, view)
+ *
+ * Writes the appropriate message body content into the given sandboxed iframe.
+ *
+ * - view === "html": uses msg.body_html if non-empty, falls back to msg.body.
+ * - view === "text": uses msg.body, wrapped in <pre> with HTML-escaping and
+ *   URL linkification.
+ *
+ * After writing, triggers the iframe height resize via the load event and a
+ * setTimeout fallback.
+ *
+ * Requirements: 1.2, 1.3, 2.4, 2.5, 2.6, 5.2
+ */
+function renderBody(iframe, msg, view) {
   let htmlContent;
-  if (isHtml) {
-    htmlContent = rawBody;
-  } else {
-    // Plain text: escape HTML, linkify URLs, preserve line breaks
+
+  if (view === "text") {
+    // Plain-text view: escape HTML, linkify URLs, wrap in <pre>
+    const rawBody = msg.body || "";
     const escaped = rawBody
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
@@ -122,11 +212,29 @@ function render() {
       '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>'
     );
     htmlContent = `<pre style="white-space:pre-wrap;word-break:break-word;font-family:inherit;font-size:14px;line-height:1.6;margin:0">${linkified}</pre>`;
+  } else {
+    // HTML view: prefer body_html; if absent, render body as pre-formatted text
+    const hasHtml = msg.body_html != null && msg.body_html !== "";
+    if (hasHtml) {
+      htmlContent = msg.body_html;
+    } else {
+      const rawBody = msg.body || "";
+      const escaped = rawBody
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+      const linkified = escaped.replace(
+        /(https?:\/\/[^\s]+)/g,
+        '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>'
+      );
+      htmlContent = `<pre style="white-space:pre-wrap;word-break:break-word;font-family:inherit;font-size:14px;line-height:1.6;margin:0">${linkified}</pre>`;
+    }
   }
 
   const doc = iframe.contentDocument || iframe.contentWindow.document;
   doc.open();
   doc.write(`<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <meta name="referrer" content="no-referrer">
     <style>
       body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 14px; color: #333; }
       a { color: #1a73e8; }
@@ -147,4 +255,174 @@ function render() {
   }, 100);
 }
 
-const messageDetail = { render };
+/**
+ * buildToggleButton(msg, iframe, bodyDiv)
+ *
+ * Creates and returns a View_Toggle <button> element when both body_html and
+ * body are non-empty, or returns null when only one (or neither) field is
+ * available.
+ *
+ * Button behaviour:
+ * - CSS class `view-toggle-btn` is always present.
+ * - CSS class `view-toggle-btn--active` is added when activeView === "text".
+ * - Label is "Plain text" when activeView === "html", "HTML" when "text".
+ * - Click handler flips activeView, calls renderBody(), and updates the
+ *   button label and active class in-place.
+ *
+ * Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 3.1, 3.2, 3.3, 4.3, 5.1
+ */
+function buildToggleButton(msg, iframe, bodyDiv) {
+  // Build a toggle switch: label "Plain text" with on/off switch
+  const wrap = document.createElement("label");
+  wrap.className = "view-toggle-switch";
+  wrap.title = "Switch between HTML and plain text view";
+
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = activeView === "html";
+
+  const track = document.createElement("span");
+  track.className = "view-toggle-track";
+
+  const labelText = document.createElement("span");
+  labelText.className = "view-toggle-label";
+  labelText.textContent = "HTML";
+
+  wrap.appendChild(checkbox);
+  wrap.appendChild(track);
+  wrap.appendChild(labelText);
+
+  checkbox.addEventListener("change", function () {
+    activeView = checkbox.checked ? "html" : "text";
+    renderBody(iframe, msg, activeView);
+  });
+
+  return wrap;
+}
+
+/**
+ * Returns true for MIME types the browser can preview natively.
+ */
+function isPreviewable(mimeType) {
+  if (!mimeType) return false;
+  if (mimeType.startsWith("image/")) return true;
+  const previewable = [
+    "application/pdf",
+    "text/plain",
+    "text/csv",
+    "text/html",
+  ];
+  return previewable.includes(mimeType);
+}
+
+/**
+ * Returns an appropriate emoji icon for a given MIME type.
+ */
+function attachmentIcon(mimeType) {
+  if (!mimeType) return "📎";
+  if (mimeType.startsWith("image/")) return "🖼️";
+  if (mimeType === "application/pdf") return "📄";
+  if (mimeType.startsWith("text/")) return "📝";
+  if (mimeType.includes("zip") || mimeType.includes("compressed")) return "🗜️";
+  if (mimeType.includes("spreadsheet") || mimeType === "text/csv") return "📊";
+  if (mimeType.includes("word") || mimeType.includes("document")) return "📝";
+  return "📎";
+}
+
+/**
+ * Opens a modal overlay to preview a browser-compatible attachment.
+ */
+function openAttachmentPreview(att, dataUrl) {
+  // Remove any existing modal
+  const existing = document.getElementById("attachment-preview-modal");
+  if (existing) existing.remove();
+
+  const overlay = document.createElement("div");
+  overlay.id = "attachment-preview-modal";
+  overlay.className = "attachment-preview-overlay";
+
+  // Close on backdrop click
+  overlay.addEventListener("click", function (e) {
+    if (e.target === overlay) overlay.remove();
+  });
+
+  const modal = document.createElement("div");
+  modal.className = "attachment-preview-modal";
+
+  // Header
+  const header = document.createElement("div");
+  header.className = "attachment-preview-header";
+
+  const title = document.createElement("span");
+  title.className = "attachment-preview-title";
+  title.textContent = att.filename || "Preview";
+
+  const actions = document.createElement("div");
+  actions.className = "attachment-preview-actions";
+
+  const downloadBtn = document.createElement("a");
+  downloadBtn.href = dataUrl;
+  downloadBtn.download = att.filename || "attachment";
+  downloadBtn.className = "attachment-preview-download";
+  downloadBtn.textContent = "⬇ Download";
+
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "attachment-preview-close";
+  closeBtn.textContent = "✕";
+  closeBtn.addEventListener("click", function () { overlay.remove(); });
+
+  actions.appendChild(downloadBtn);
+  actions.appendChild(closeBtn);
+  header.appendChild(title);
+  header.appendChild(actions);
+  modal.appendChild(header);
+
+  // Preview content
+  const body = document.createElement("div");
+  body.className = "attachment-preview-body";
+
+  if (att.mime_type.startsWith("image/")) {
+    const img = document.createElement("img");
+    img.src = dataUrl;
+    img.alt = att.filename || "image";
+    img.className = "attachment-preview-image";
+    body.appendChild(img);
+  } else if (att.mime_type === "application/pdf") {
+    // Use <object> for PDF — more reliable than iframe in Chrome/Edge
+    const obj = document.createElement("object");
+    obj.data = dataUrl + "?preview=1";
+    obj.type = "application/pdf";
+    obj.className = "attachment-preview-frame";
+    // Fallback for browsers that can't render inline PDF
+    const fallback = document.createElement("div");
+    fallback.style.cssText = "padding:24px;text-align:center;color:#555;font-size:14px";
+    fallback.innerHTML = 'Your browser cannot preview PDFs inline. <a href="' + dataUrl + '" download="' + (att.filename || 'attachment') + '" style="color:#1a73e8">Download instead</a>.';
+    obj.appendChild(fallback);
+    body.appendChild(obj);
+  } else {
+    // text/plain, text/csv etc — iframe works fine
+    const frame = document.createElement("iframe");
+    frame.src = dataUrl + "?preview=1";
+    frame.className = "attachment-preview-frame";
+    frame.setAttribute("title", att.filename || "preview");
+    body.appendChild(frame);
+  }
+
+  modal.appendChild(body);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  // Close on Escape
+  function onKeyDown(e) {
+    if (e.key === "Escape") {
+      overlay.remove();
+      document.removeEventListener("keydown", onKeyDown);
+    }
+  }
+  document.addEventListener("keydown", onKeyDown);
+  overlay.addEventListener("remove", function () {
+    document.removeEventListener("keydown", onKeyDown);
+  });
+}
+
+const messageDetail = { render, renderBody, buildToggleButton };

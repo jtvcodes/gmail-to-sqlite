@@ -29,6 +29,7 @@ CREATE TABLE messages (
     labels       TEXT,
     subject      TEXT,
     body         TEXT,
+    body_html    TEXT,
     size         INTEGER,
     timestamp    DATETIME,
     is_read      INTEGER,
@@ -105,7 +106,7 @@ def _seed_db(path: str, messages: list) -> None:
     conn.execute(CREATE_TABLE_SQL)
     for i, msg in enumerate(messages):
         conn.execute(
-            "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+            "INSERT INTO messages VALUES (?,?,?,?,?,?,?,NULL,?,?,?,?,?,NULL)",
             (
                 str(i),  # unique message_id by index
                 msg["thread_id"],

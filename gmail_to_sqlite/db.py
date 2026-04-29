@@ -3,8 +3,11 @@ from datetime import datetime
 from typing import Any, List, Optional
 
 from peewee import (
+    AutoField,
+    BlobField,
     BooleanField,
     DateTimeField,
+    ForeignKeyField,
     IntegerField,
     Model,
     Proxy,
@@ -74,6 +77,7 @@ class Message(Model):
     labels = JSONField()
     subject = TextField(null=True)
     body = TextField(null=True)
+    body_html = TextField(null=True)
     size = IntegerField()
     timestamp = DateTimeField()
     is_read = BooleanField()
@@ -84,6 +88,43 @@ class Message(Model):
     class Meta:
         database = database_proxy
         table_name = "messages"
+
+
+class Attachment(Model):
+    """
+    Represents an email attachment linked to a message.
+
+    Attributes:
+        id (AutoField): Auto-incrementing primary key.
+        message_id (ForeignKeyField): FK to messages.message_id.
+        filename (TextField): Attachment filename (nullable).
+        mime_type (TextField): MIME type of the attachment.
+        size (IntegerField): Size in bytes (default 0).
+        data (BlobField): Raw attachment bytes (nullable for large attachments).
+        attachment_id (TextField): Gmail attachment ID for large-attachment fetch (nullable).
+
+    Meta:
+        database (Database): The database connection to use.
+        table_name (str): The name of the database table.
+    """
+
+    id = AutoField()
+    message_id = ForeignKeyField(
+        Message,
+        backref="attachments",
+        column_name="message_id",
+        field="message_id",
+    )
+    filename = TextField(null=True)
+    mime_type = TextField()
+    size = IntegerField(default=0)
+    data = BlobField(null=True)
+    attachment_id = TextField(null=True)
+    content_id = TextField(null=True)
+
+    class Meta:
+        database = database_proxy
+        table_name = "attachments"
 
 
 def init(data_dir: str, enable_logging: bool = False) -> SqliteDatabase:
@@ -104,7 +145,7 @@ def init(data_dir: str, enable_logging: bool = False) -> SqliteDatabase:
         db_path = f"{data_dir}/{DATABASE_FILE_NAME}"
         db = SqliteDatabase(db_path)
         database_proxy.initialize(db)
-        db.create_tables([Message, SchemaVersion])
+        db.create_tables([Message, SchemaVersion, Attachment])
 
         if enable_logging:
             logger = logging.getLogger("peewee")
@@ -119,6 +160,44 @@ def init(data_dir: str, enable_logging: bool = False) -> SqliteDatabase:
         return db
     except Exception as e:
         raise DatabaseError(f"Failed to initialize database: {e}")
+
+
+def create_attachments(message_id: str, attachments: List) -> None:
+    """
+    Replaces all attachment rows for a message with the provided list.
+
+    Deletes any existing attachment rows for ``message_id`` first, then
+    bulk-inserts the new rows.  This makes the operation idempotent for
+    re-syncs.
+
+    Args:
+        message_id (str): The message ID whose attachments are being stored.
+        attachments (List): List of ``gmail_to_sqlite.message.Attachment``
+            dataclass instances.
+
+    Raises:
+        DatabaseError: If the delete or insert operation fails.
+    """
+    try:
+        Attachment.delete().where(Attachment.message_id == message_id).execute()
+        if attachments:
+            rows = [
+                {
+                    "message_id": message_id,
+                    "filename": a.filename,
+                    "mime_type": a.mime_type,
+                    "size": a.size,
+                    "data": a.data,
+                    "attachment_id": a.attachment_id,
+                    "content_id": a.content_id,
+                }
+                for a in attachments
+            ]
+            Attachment.insert_many(rows).execute()
+    except Exception as e:
+        raise DatabaseError(
+            f"Failed to save attachments for message {message_id}: {e}"
+        )
 
 
 def create_message(msg: Any) -> None:
@@ -141,6 +220,7 @@ def create_message(msg: Any) -> None:
             labels=msg.labels,
             subject=msg.subject,
             body=msg.body,
+            body_html=msg.body_html,
             size=msg.size,
             timestamp=msg.timestamp,
             is_read=msg.is_read,
@@ -154,8 +234,10 @@ def create_message(msg: Any) -> None:
                 Message.last_indexed: last_indexed,
                 Message.labels: msg.labels,
                 Message.is_deleted: False,
+                Message.body_html: msg.body_html,
             },
         ).execute()
+        create_attachments(msg.id, getattr(msg, "attachments", []))
     except Exception as e:
         raise DatabaseError(f"Failed to save message {msg.id}: {e}")
 
@@ -232,6 +314,25 @@ def get_all_message_ids() -> List[str]:
         return [message.message_id for message in Message.select(Message.message_id)]
     except Exception as e:
         raise DatabaseError(f"Failed to retrieve message IDs: {e}")
+
+
+def get_message_ids_missing_html() -> List[str]:
+    """
+    Returns message IDs where body_html is NULL (candidates for re-sync
+    to fix the shallow HTML extraction bug for multipart/mixed messages).
+
+    Returns:
+        List[str]: List of message IDs with NULL body_html.
+    """
+    try:
+        return [
+            message.message_id
+            for message in Message.select(Message.message_id).where(
+                Message.body_html.is_null(True)
+            )
+        ]
+    except Exception as e:
+        raise DatabaseError(f"Failed to retrieve message IDs missing html: {e}")
 
 
 def get_deleted_message_ids() -> List[str]:

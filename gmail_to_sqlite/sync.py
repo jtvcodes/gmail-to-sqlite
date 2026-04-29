@@ -1,5 +1,7 @@
 import concurrent.futures
+import base64
 import logging
+import os
 import socket
 import threading
 import time
@@ -43,6 +45,46 @@ def _get_thread_service(credentials: Any) -> Any:
     if not hasattr(_thread_local, "service"):
         _thread_local.service = _create_service(credentials)
     return _thread_local.service
+
+
+def _save_attachments_to_disk(service: Any, msg: Any, data_dir: str) -> None:
+    """Download real attachments to data/attachments/<message_id>/ while tokens are fresh.
+
+    Skips attachments that are already cached, have no filename, or have no
+    attachment_id (inline data is already stored in the DB).
+    """
+    attachments = getattr(msg, "attachments", [])
+    if not attachments:
+        return
+
+    for att in attachments:
+        # Skip MIME container parts and attachments without a usable filename/id
+        if not att.filename or not att.attachment_id:
+            continue
+        if att.mime_type.startswith("multipart/"):
+            continue
+
+        cache_dir = os.path.join(data_dir, "attachments", msg.id)
+        cache_path = os.path.join(cache_dir, att.filename)
+
+        if os.path.isfile(cache_path):
+            continue  # already cached
+
+        try:
+            result = (
+                service.users()
+                .messages()
+                .attachments()
+                .get(userId="me", messageId=msg.id, id=att.attachment_id)
+                .execute()
+            )
+            data = base64.urlsafe_b64decode(result.get("data", ""))
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(cache_path, "wb") as f:
+                f.write(data)
+            logging.info(f"Cached attachment {att.filename} for message {msg.id}")
+        except Exception as e:
+            logging.warning(f"Could not download attachment {att.filename} for message {msg.id}: {e}")
 
 
 def _fetch_message(
@@ -302,7 +344,9 @@ def _detect_and_mark_deleted_messages(
 
 def all_messages(
     credentials: Any,
-    full_sync: bool = False,
+    data_dir: str,
+    full_sync: bool = True,
+    force: bool = False,
     num_workers: int = 4,
     check_shutdown: Optional[Callable[[], bool]] = None,
 ) -> int:
@@ -338,18 +382,12 @@ def all_messages(
         if not full_sync:
             last = db.last_indexed()
             if last:
+                # Only fetch messages newer than the most recently indexed one
                 query.append(f"after:{_safe_timestamp(last)}")
-            first = db.first_indexed()
-            if first:
-                ts = _safe_timestamp(first)
-                if ts > 0:  # skip pre-epoch dates entirely
-                    query.append(f"before:{ts}")
-
         service = _create_service(credentials)
         labels = get_labels(service)
 
         all_message_ids = get_message_ids_from_gmail(service, query, check_shutdown)
-
         if check_shutdown and check_shutdown():
             logging.info(
                 "Shutdown requested during message ID collection. Exiting gracefully."
@@ -358,6 +396,23 @@ def all_messages(
 
         if full_sync:
             _detect_and_mark_deleted_messages(all_message_ids, check_shutdown)
+
+        # For full sync, skip IDs already in the DB to avoid re-fetching,
+        # EXCEPT for messages where body_html is NULL (extraction bug fix).
+        # --force skips all filtering and re-fetches everything.
+        if full_sync and all_message_ids and not force:
+            known_ids = set(db.get_all_message_ids())
+            needs_html_fix = set(db.get_message_ids_missing_html())
+            missing_ids = [mid for mid in all_message_ids if mid not in known_ids or mid in needs_html_fix]
+            logging.info(
+                f"Full sync: {len(all_message_ids)} total in Gmail, "
+                f"{len(known_ids)} already in DB, "
+                f"{len(needs_html_fix)} missing body_html, "
+                f"{len(missing_ids)} to fetch."
+            )
+            all_message_ids = missing_ids
+        elif force:
+            logging.info(f"Force sync: re-fetching all {len(all_message_ids)} messages.")
 
         logging.info(f"Found {len(all_message_ids)} messages to sync.")
 
@@ -382,6 +437,8 @@ def all_messages(
                     logging.info(
                         f"Successfully synced message {msg.id} (Original ID: {message_id}) from {msg.timestamp}"
                     )
+                    # Download attachments to disk while tokens are still fresh
+                    _save_attachments_to_disk(service, msg, data_dir)
                     return True
                 except IntegrityError as e:
                     logging.error(
@@ -478,6 +535,7 @@ def sync_deleted_messages(
 def single_message(
     credentials: Any,
     message_id: str,
+    data_dir: str = "",
     check_shutdown: Optional[Callable[[], bool]] = None,
 ) -> None:
     """
@@ -514,6 +572,8 @@ def single_message(
             logging.info(
                 f"Successfully synced message {msg.id} (Original ID: {message_id}) from {msg.timestamp}"
             )
+            if data_dir:
+                _save_attachments_to_disk(service, msg, data_dir)
         except IntegrityError as e:
             logging.error(
                 f"Could not process message {message_id} due to integrity error: {str(e)}"

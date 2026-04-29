@@ -1,4 +1,6 @@
 import base64
+import email.message
+from dataclasses import dataclass
 from datetime import datetime
 from email.utils import parseaddr, parsedate_to_datetime
 from typing import Dict, List, Optional
@@ -6,6 +8,18 @@ from typing import Dict, List, Optional
 from bs4 import BeautifulSoup
 
 from .constants import SUPPORTED_MIME_TYPES
+
+
+@dataclass
+class Attachment:
+    """Represents an email attachment extracted from a Gmail API payload."""
+
+    filename: Optional[str]
+    mime_type: str
+    size: int
+    data: Optional[bytes]
+    attachment_id: Optional[str]
+    content_id: Optional[str] = None
 
 
 class MessageParsingError(Exception):
@@ -45,6 +59,7 @@ class Message:
         self.timestamp: Optional[datetime] = None
         self.is_read: bool = False
         self.is_outgoing: bool = False
+        self.attachments: List[Attachment] = []
 
     @classmethod
     def from_raw(cls, raw: Dict, labels: Dict[str, str]) -> "Message":
@@ -203,9 +218,9 @@ class Message:
         """
         Extract the raw HTML body from a message payload.
 
-        Walks the payload looking for a ``text/html`` part, decodes it from
-        base64url, and returns the resulting string.  Returns ``None`` when no
-        HTML part is present or when decoding fails for any reason.
+        Recursively walks the payload looking for a ``text/html`` part,
+        decodes it from base64url, and returns the resulting string.
+        Returns ``None`` when no HTML part is present or when decoding fails.
 
         Args:
             payload (Dict): The message payload from Gmail API.
@@ -216,28 +231,119 @@ class Message:
         try:
             mime_type = payload.get("mimeType", "")
 
-            # Non-multipart payload
+            # Non-multipart payload — check if it's text/html directly
             if "parts" not in payload:
                 if mime_type == "text/html":
                     data = payload.get("body", {}).get("data")
-                    if data:
+                    if data is not None:
                         return base64.urlsafe_b64decode(data).decode("utf-8")
                 return None
 
-            # Multipart payload — walk parts looking for text/html
+            # Multipart payload — walk parts, recurse into nested multipart
             for part in payload["parts"]:
-                if part.get("mimeType", "") == "text/html":
+                part_mime = part.get("mimeType", "")
+                if part_mime == "text/html":
                     data = part.get("body", {}).get("data")
-                    if data:
+                    if data is not None:
                         try:
                             return base64.urlsafe_b64decode(data).decode("utf-8")
                         except Exception:
                             return None
+                elif part_mime.startswith("multipart/"):
+                    # Recurse into nested multipart (e.g. multipart/alternative
+                    # inside multipart/mixed)
+                    result = self._extract_html_body(part)
+                    if result is not None:
+                        return result
 
         except Exception:
             pass
 
         return None
+
+    def _extract_attachments(self, payload: Dict) -> List[Attachment]:
+        """
+        Walk a multipart payload and extract attachment parts.
+
+        Skips ``text/plain`` and ``text/html`` parts (body parts).  For every
+        remaining part, extracts filename, mime_type, size, data, and
+        attachment_id.  Non-multipart payloads return an empty list.  Any
+        per-part decoding failure sets ``data = None`` for that part and
+        continues without propagating the exception.
+
+        Args:
+            payload (Dict): The message payload from Gmail API.
+
+        Returns:
+            List[Attachment]: Extracted attachment objects.
+        """
+        if "parts" not in payload:
+            return []
+
+        attachments: List[Attachment] = []
+        for part in payload["parts"]:
+            mime_type = part.get("mimeType", "")
+            if mime_type in ("text/plain", "text/html"):
+                continue
+
+            # --- filename extraction (task 10.4) ---
+            filename: Optional[str] = None
+            headers = part.get("headers", [])
+
+            # Build a lookup dict for quick access
+            header_map: Dict[str, str] = {}
+            for h in headers:
+                header_map[h["name"].lower()] = h["value"]
+
+            # Try Content-Disposition filename parameter first
+            content_disposition = header_map.get("content-disposition", "")
+            if content_disposition:
+                msg = email.message.Message()
+                msg["Content-Disposition"] = content_disposition
+                filename = msg.get_param("filename", header="content-disposition")
+
+            # Fall back to Content-Type name parameter
+            if filename is None:
+                content_type = header_map.get("content-type", "")
+                if content_type:
+                    msg = email.message.Message()
+                    msg["Content-Type"] = content_type
+                    filename = msg.get_param("name")
+
+            # --- size ---
+            size: int = part.get("body", {}).get("size", 0)
+
+            # --- data decoding (task 10.5) ---
+            data: Optional[bytes] = None
+            raw_data = part.get("body", {}).get("data")
+            if raw_data is not None:
+                try:
+                    data = base64.urlsafe_b64decode(raw_data)
+                except Exception:
+                    data = None
+
+            # --- attachment_id (task 10.6) ---
+            attachment_id: Optional[str] = part.get("body", {}).get("attachmentId")
+
+            # --- content_id (for cid: inline image resolution) ---
+            content_id: Optional[str] = None
+            raw_cid = header_map.get("content-id", "")
+            if raw_cid:
+                # Strip angle brackets: <ii_abc123> → ii_abc123
+                content_id = raw_cid.strip("<>")
+
+            attachments.append(
+                Attachment(
+                    filename=filename,
+                    mime_type=mime_type,
+                    size=size,
+                    data=data,
+                    attachment_id=attachment_id,
+                    content_id=content_id,
+                )
+            )
+
+        return attachments
 
     def _extract_body(self, payload: Dict) -> None:
         """
@@ -269,3 +375,6 @@ class Message:
                     if body_text:
                         self.body = self.html2text(body_text)
                         break
+
+        # Extract attachments from the payload (task 10.7)
+        self.attachments = self._extract_attachments(payload)

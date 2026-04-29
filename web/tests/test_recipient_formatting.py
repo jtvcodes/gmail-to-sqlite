@@ -35,6 +35,7 @@ CREATE TABLE messages (
     labels       TEXT,
     subject      TEXT,
     body         TEXT,
+    body_html    TEXT,
     size         INTEGER,
     timestamp    DATETIME,
     is_read      INTEGER,
@@ -106,7 +107,7 @@ def _seed_db_with_message(path: str, recipients: dict) -> str:
     conn.execute(CREATE_TABLE_SQL)
     message_id = "test_msg_1"
     conn.execute(
-        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,NULL,?,?,?,?,?,NULL)",
         (
             message_id,
             "thread1",

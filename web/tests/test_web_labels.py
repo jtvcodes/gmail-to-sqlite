@@ -19,6 +19,7 @@ CREATE TABLE messages (
     labels       TEXT,
     subject      TEXT,
     body         TEXT,
+    body_html    TEXT,
     size         INTEGER,
     timestamp    DATETIME,
     is_read      INTEGER,
@@ -70,7 +71,7 @@ def _seed_db(path: str) -> None:
     conn = sqlite3.connect(path)
     conn.execute(CREATE_TABLE_SQL)
     conn.executemany(
-        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,NULL,?,?,?,?,?,NULL)",
         SEED_ROWS,
     )
     conn.commit()
@@ -167,7 +168,7 @@ class TestGetLabels:
         conn = sqlite3.connect(path)
         conn.execute(CREATE_TABLE_SQL)
         conn.execute(
-            "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+            "INSERT INTO messages VALUES (?,?,?,?,?,?,?,NULL,?,?,?,?,?,NULL)",
             ("m1", "t1", "{}", "{}", '["INBOX"]', "s", "b", 1, "2024-01-01", 0, 0, 1),
         )
         conn.commit()

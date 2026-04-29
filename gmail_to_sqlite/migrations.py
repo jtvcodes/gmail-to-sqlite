@@ -34,6 +34,27 @@ def column_exists(table_name: str, column_name: str) -> bool:
         return False
 
 
+def table_exists(table_name: str) -> bool:
+    """
+    Check if a table exists in the database.
+
+    Args:
+        table_name (str): The name of the table to check.
+
+    Returns:
+        bool: True if the table exists, False otherwise.
+    """
+    try:
+        cursor = database_proxy.obj.execute_sql(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        )
+        return cursor.fetchone() is not None
+    except Exception as e:
+        logger.error(f"Error checking if table {table_name} exists: {e}")
+        return False
+
+
 def get_schema_version() -> int:
     """
     Get the current database schema version.
@@ -92,18 +113,63 @@ def run_migrations() -> bool:
             if run():
                 if set_schema_version(1):
                     logger.info("Migration v1 completed successfully, version set to 1")
+                    current_version = 1
                 else:
                     logger.error("Failed to set schema version to 1")
                     return False
             else:
                 logger.error("Migration v1 failed")
                 return False
-        elif current_version >= 1:
+
+        if current_version == 1:
+            logger.info("Running migration v2: add body_html column")
+            from .schema_migrations.v2_add_body_html_column import run as run_v2
+
+            if run_v2():
+                if set_schema_version(2):
+                    logger.info("Migration v2 completed successfully, version set to 2")
+                    current_version = 2
+                else:
+                    logger.error("Failed to set schema version to 2")
+                    return False
+            else:
+                logger.error("Migration v2 failed")
+                return False
+
+        if current_version == 2:
+            logger.info("Running migration v3: create attachments table")
+            from .schema_migrations.v3_create_attachments_table import run as run_v3
+
+            if run_v3():
+                if set_schema_version(3):
+                    logger.info("Migration v3 completed successfully, version set to 3")
+                    current_version = 3
+                else:
+                    logger.error("Failed to set schema version to 3")
+                    return False
+            else:
+                logger.error("Migration v3 failed")
+                return False
+
+        if current_version >= 3:
+            logger.info("Running migration v4: add content_id column to attachments")
+            from .schema_migrations.v4_add_content_id_column import run as run_v4
+
+            if run_v4():
+                if set_schema_version(4):
+                    logger.info("Migration v4 completed successfully, version set to 4")
+                    current_version = 4
+                else:
+                    logger.error("Failed to set schema version to 4")
+                    return False
+            else:
+                logger.error("Migration v4 failed")
+                return False
+
+        if current_version >= 4:
             logger.info(
-                f"Database already at version {current_version}, no migrations needed"
+                f"Database already at version {current_version}, no further migrations needed"
             )
-        else:
-            logger.warning(f"Unexpected schema version {current_version}")
 
         logger.info("All migrations completed successfully")
         return True

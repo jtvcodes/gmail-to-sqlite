@@ -92,13 +92,13 @@ def create_argument_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Commands:
-  sync                     Sync all messages (incremental by default)
+  sync                     Sync all messages (full sync by default, skips already-downloaded)
   sync-message             Sync a single message by ID
   sync-deleted-messages    Detect and mark deleted messages
 
 Examples:
   %(prog)s sync --data-dir ./data
-  %(prog)s sync --data-dir ./data --full-sync
+  %(prog)s sync --data-dir ./data --delta
   %(prog)s sync-message --data-dir ./data --message-id abc123
         """,
     )
@@ -112,9 +112,14 @@ Examples:
         "--data-dir", required=True, help="The path where the data should be stored"
     )
     parser.add_argument(
-        "--full-sync",
+        "--delta",
         action="store_true",
-        help="Force a full sync of all messages and detect deleted messages",
+        help="Only fetch messages newer than the most recently synced one (faster, but misses gaps)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-fetch and overwrite all messages, even ones already in the DB",
     )
     parser.add_argument(
         "--message-id",
@@ -161,13 +166,15 @@ def main() -> None:
             if args.command == "sync":
                 sync.all_messages(
                     credentials,
-                    full_sync=args.full_sync,
+                    data_dir=args.data_dir,
+                    full_sync=not args.delta,
+                    force=args.force,
                     num_workers=args.workers,
                     check_shutdown=check_shutdown,
                 )
             elif args.command == "sync-message":
                 sync.single_message(
-                    credentials, args.message_id, check_shutdown=check_shutdown
+                    credentials, args.message_id, data_dir=args.data_dir, check_shutdown=check_shutdown
                 )
             elif args.command == "sync-deleted-messages":
                 sync.sync_deleted_messages(credentials, check_shutdown=check_shutdown)

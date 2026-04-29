@@ -61,6 +61,12 @@ function render() {
 
       const subjectCell = document.createElement("td");
       subjectCell.textContent = message.subject || "(no subject)";
+      if (message.has_attachments) {
+        const clip = document.createElement("span");
+        clip.textContent = " 📎";
+        clip.title = "Has attachments";
+        subjectCell.appendChild(clip);
+      }
       tr.appendChild(subjectCell);
 
       const dateCell = document.createElement("td");

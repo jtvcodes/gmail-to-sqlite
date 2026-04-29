@@ -31,14 +31,17 @@ function setLoading(on, label) {
   const overlay = document.getElementById("loading-overlay");
   const bar = document.getElementById("filter-bar");
   const lbl = document.getElementById("loading-label");
+  const syncBtn = document.getElementById("sync-btn");
   if (on) {
     if (lbl) lbl.textContent = label || "";
     overlay.removeAttribute("hidden");
     bar.classList.add("loading");
+    if (syncBtn) syncBtn.disabled = true;
   } else {
     overlay.setAttribute("hidden", "");
     bar.classList.remove("loading");
     if (lbl) lbl.textContent = "";
+    if (syncBtn) syncBtn.disabled = false;
   }
 }
 

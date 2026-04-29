@@ -337,3 +337,238 @@ main {
   min-height: 100px;
   display: block;
 }
+
+/* View toggle wrapper */
+.detail-toggle-wrap {
+  margin-bottom: 12px;
+}
+
+/* View toggle switch */
+.view-toggle-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 13px;
+  color: #555;
+}
+
+.view-toggle-switch input[type="checkbox"] {
+  display: none;
+}
+
+.view-toggle-track {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  background: #ccc;
+  border-radius: 10px;
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+
+.view-toggle-track::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.2s;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+
+.view-toggle-switch input:checked + .view-toggle-track {
+  background: #1a73e8;
+}
+
+.view-toggle-switch input:checked + .view-toggle-track::after {
+  transform: translateX(16px);
+}
+
+.view-toggle-label {
+  color: #555;
+  font-size: 13px;
+}
+
+.view-toggle-switch input:checked ~ .view-toggle-label {
+  color: #1a73e8;
+  font-weight: 500;
+}
+
+/* Attachments section in message detail */
+.detail-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.detail-attachment-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: #fafafa;
+  text-decoration: none;
+  color: inherit;
+  transition: background 0.15s;
+}
+
+.detail-attachment-item:hover {
+  background: #f0f4ff;
+  border-color: #1a73e8;
+}
+
+.detail-attachment-icon {
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.detail-attachment-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.detail-attachment-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: #1a73e8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detail-attachment-meta {
+  font-size: 11px;
+  color: #888;
+  margin-top: 1px;
+}
+
+/* Attachment preview modal */
+.attachment-preview-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.attachment-preview-modal {
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  width: 90vw;
+  max-width: 960px;
+  height: 85vh;
+  overflow: hidden;
+}
+
+.attachment-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #eee;
+  flex-shrink: 0;
+}
+
+.attachment-preview-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: #333;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60%;
+}
+
+.attachment-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.attachment-preview-download {
+  padding: 5px 12px;
+  border: 1px solid #1a73e8;
+  border-radius: 4px;
+  background: #fff;
+  color: #1a73e8;
+  font-size: 13px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.attachment-preview-download:hover {
+  background: #e8f0fe;
+}
+
+.attachment-preview-close {
+  background: none;
+  border: none;
+  font-size: 18px;
+  cursor: pointer;
+  color: #666;
+  line-height: 1;
+  padding: 4px 8px;
+}
+
+.attachment-preview-close:hover {
+  color: #333;
+}
+
+.attachment-preview-body {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f5f5f5;
+  padding: 16px;
+}
+
+.attachment-preview-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.attachment-preview-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #fff;
+  border-radius: 4px;
+}
+
+/* Message ID in detail meta */
+.detail-message-id {
+  font-size: 11px;
+  color: #aaa;
+  margin-top: 4px;
+  font-family: monospace;
+  user-select: all;
+}
+
+/* PDF object tag in preview */
+object.attachment-preview-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  display: block;
+}

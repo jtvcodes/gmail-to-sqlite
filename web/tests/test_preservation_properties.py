@@ -36,6 +36,7 @@ CREATE TABLE messages (
     labels       TEXT,
     subject      TEXT,
     body         TEXT,
+    body_html    TEXT,
     size         INTEGER,
     timestamp    DATETIME,
     is_read      INTEGER,
@@ -119,7 +120,7 @@ def _seed_db_with_message(path: str, msg: dict) -> str:
     conn.execute(CREATE_TABLE_SQL)
     message_id = "test_msg_1"
     conn.execute(
-        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,NULL,?,?,?,?,?,NULL)",
         (
             message_id,
             "thread1",
@@ -621,7 +622,7 @@ def _seed_preservation_db(path: str) -> None:
     conn = sqlite3.connect(path)
     conn.execute(CREATE_TABLE_SQL)
     conn.executemany(
-        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,NULL,?,?,?,?,?,NULL)",
         PRESERVATION_SEED_ROWS,
     )
     conn.commit()

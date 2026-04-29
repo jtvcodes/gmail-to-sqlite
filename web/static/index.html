@@ -7,13 +7,13 @@
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-  <div id="loading-overlay" hidden>
+  <div id="loading-overlay">
     <div class="spinner"></div>
     <div id="loading-label" style="margin-top:12px;font-size:13px;color:#555"></div>
   </div>
   <header>
     <h1>Gmail Web Viewer</h1>
-    <button id="sync-btn" onclick="runSync()">⟳ Sync</button>
+    <button id="sync-btn" onclick="runSync()" disabled>⟳ Sync</button>
   </header>
 
   <main>
