@@ -324,14 +324,26 @@ def all_messages(
     future_to_id = {}
 
     try:
+        from datetime import timezone, datetime as _datetime
+        _EPOCH = _datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+        def _safe_timestamp(dt):
+            """Return Unix timestamp, clamping pre-epoch dates to 0 (Windows fix)."""
+            try:
+                return int(dt.timestamp())
+            except (OSError, OverflowError, ValueError):
+                return 0
+
         query = []
         if not full_sync:
             last = db.last_indexed()
             if last:
-                query.append(f"after:{int(last.timestamp())}")
+                query.append(f"after:{_safe_timestamp(last)}")
             first = db.first_indexed()
             if first:
-                query.append(f"before:{int(first.timestamp())}")
+                ts = _safe_timestamp(first)
+                if ts > 0:  # skip pre-epoch dates entirely
+                    query.append(f"before:{ts}")
 
         service = _create_service(credentials)
         labels = get_labels(service)

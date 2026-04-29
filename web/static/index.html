@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gmail Web Viewer</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div id="loading-overlay" hidden>
+    <div class="spinner"></div>
+    <div id="loading-label" style="margin-top:12px;font-size:13px;color:#555"></div>
+  </div>
+  <header>
+    <h1>Gmail Web Viewer</h1>
+    <button id="sync-btn" onclick="runSync()">⟳ Sync</button>
+  </header>
+
+  <main>
+    <div id="error-banner" hidden></div>
+
+    <div id="filter-bar"></div>
+
+    <div id="search-summary" hidden></div>
+
+    <div id="message-list"></div>
+
+    <div id="message-detail" hidden></div>
+  </main>
+
+  <script src="/static/api.js"></script>
+  <script src="/static/filters.js"></script>
+  <script src="/static/messageList.js"></script>
+  <script src="/static/messageDetail.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

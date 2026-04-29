@@ -11,6 +11,7 @@ class TestDatabase:
         db_path = str(temp_dir)
         db = init(db_path)
         assert db is not None
+        db.close()
 
     def test_message_model(self):
         """Test Message model creation."""

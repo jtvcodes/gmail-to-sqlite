@@ -40,6 +40,7 @@ class Message:
         self.labels: List[str] = []
         self.subject: Optional[str] = None
         self.body: Optional[str] = None
+        self.body_html: Optional[str] = None
         self.size: int = 0
         self.timestamp: Optional[datetime] = None
         self.is_read: bool = False
@@ -198,6 +199,46 @@ class Message:
                 f"Failed to parse message {msg.get('id', 'unknown')}: {e}"
             )
 
+    def _extract_html_body(self, payload: Dict) -> Optional[str]:
+        """
+        Extract the raw HTML body from a message payload.
+
+        Walks the payload looking for a ``text/html`` part, decodes it from
+        base64url, and returns the resulting string.  Returns ``None`` when no
+        HTML part is present or when decoding fails for any reason.
+
+        Args:
+            payload (Dict): The message payload from Gmail API.
+
+        Returns:
+            Optional[str]: The decoded HTML string, or ``None``.
+        """
+        try:
+            mime_type = payload.get("mimeType", "")
+
+            # Non-multipart payload
+            if "parts" not in payload:
+                if mime_type == "text/html":
+                    data = payload.get("body", {}).get("data")
+                    if data:
+                        return base64.urlsafe_b64decode(data).decode("utf-8")
+                return None
+
+            # Multipart payload — walk parts looking for text/html
+            for part in payload["parts"]:
+                if part.get("mimeType", "") == "text/html":
+                    data = part.get("body", {}).get("data")
+                    if data:
+                        try:
+                            return base64.urlsafe_b64decode(data).decode("utf-8")
+                        except Exception:
+                            return None
+
+        except Exception:
+            pass
+
+        return None
+
     def _extract_body(self, payload: Dict) -> None:
         """
         Extract the body text from message payload.
@@ -205,6 +246,9 @@ class Message:
         Args:
             payload (Dict): The message payload from Gmail API.
         """
+        # Extract raw HTML body (sub-task 1.3)
+        self.body_html = self._extract_html_body(payload)
+
         # For non-multipart messages
         if "body" in payload and "data" in payload["body"]:
             try:

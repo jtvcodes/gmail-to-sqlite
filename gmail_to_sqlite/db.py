@@ -40,7 +40,7 @@ class SchemaVersion(Model):
 
     class Meta:
         database = database_proxy
-        db_table = "schema_version"
+        table_name = "schema_version"
 
 
 class Message(Model):
@@ -83,7 +83,7 @@ class Message(Model):
 
     class Meta:
         database = database_proxy
-        db_table = "messages"
+        table_name = "messages"
 
 
 def init(data_dir: str, enable_logging: bool = False) -> SqliteDatabase:
