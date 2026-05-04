@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gmail Web Viewer</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div id="loading-overlay">
+    <div class="loading-card">
+      <button id="sync-minimize-btn" hidden title="Minimize sync window" aria-label="Minimize sync window">—</button>
+      <div class="spinner"></div>
+      <div id="loading-label"></div>
+      <div id="sync-live-output-wrap">
+        <pre id="sync-live-output"></pre>
+        <button id="sync-scroll-btn" hidden aria-label="Scroll to bottom">↓ Scroll to bottom</button>
+      </div>
+    </div>
+  </div>
+  <button id="sync-restore-tab" hidden aria-label="Restore sync window">
+    <span class="sync-restore-spinner"></span>
+    <span id="sync-restore-label">Syncing…</span>
+  </button>
+  <header>
+    <h1>Gmail Web Viewer</h1>
+    <div class="header-actions">
+      <button id="refresh-btn" title="Refresh message list" aria-label="Refresh message list" onclick="refreshMessages()">↺ Refresh</button>
+      <div class="sync-split-btn" id="sync-split-btn">
+      <button
+        id="sync-primary-btn"
+        class="sync-primary"
+        onclick="runSync('delta')"
+      >⟳ Sync New Data</button>
+      <button
+        id="sync-toggle-btn"
+        class="sync-toggle"
+        aria-haspopup="true"
+        aria-expanded="false"
+        aria-label="More sync options"
+        onclick="toggleSyncDropdown(event)"
+      >▾</button>
+      <ul
+        id="sync-dropdown"
+        class="sync-dropdown-menu"
+        role="menu"
+        hidden
+      >
+        <li role="menuitem" tabindex="-1" onclick="runSync('delta')">⟳ Sync New Data</li>
+        <li role="menuitem" tabindex="-1" onclick="runSync('force')">⟳ Sync All (Forced)</li>
+        <li role="menuitem" tabindex="-1" onclick="runSync('missing')">⟳ Sync Missing</li>
+        <li role="menuitem" tabindex="-1" onclick="runSync('test')">⟳ Sync 10k (test)</li>
+      </ul>
+    </div>
+    </div>
+  </header>
+
+  <main>
+    <div id="error-banner" hidden></div>
+
+    <div id="filter-bar"></div>
+
+    <div id="search-summary" hidden></div>
+
+    <div id="message-list"></div>
+
+    <details id="sync-output-panel" hidden>
+      <summary>Last sync output</summary>
+      <pre id="sync-output-text"></pre>
+    </details>
+
+    <div id="message-detail" hidden></div>
+  </main>
+
+  <footer id="db-stats-footer" class="db-stats-footer" hidden>
+    <span id="db-stats"></span>
+  </footer>
+
+  <script src="/static/api.js"></script>
+  <script src="/static/filters.js"></script>
+  <script src="/static/messageList.js"></script>
+  <script src="/static/messageDetail.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
