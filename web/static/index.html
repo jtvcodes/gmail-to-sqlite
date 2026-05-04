@@ -8,13 +8,25 @@
 </head>
 <body>
   <div id="loading-overlay">
-    <div class="spinner"></div>
-    <div id="loading-label" style="margin-top:12px;font-size:13px;color:#555"></div>
-    <pre id="sync-live-output"></pre>
+    <div class="loading-card">
+      <button id="sync-minimize-btn" hidden title="Minimize sync window" aria-label="Minimize sync window">—</button>
+      <div class="spinner"></div>
+      <div id="loading-label"></div>
+      <div id="sync-live-output-wrap">
+        <pre id="sync-live-output"></pre>
+        <button id="sync-scroll-btn" hidden aria-label="Scroll to bottom">↓ Scroll to bottom</button>
+      </div>
+    </div>
   </div>
+  <button id="sync-restore-tab" hidden aria-label="Restore sync window">
+    <span class="sync-restore-spinner"></span>
+    <span id="sync-restore-label">Syncing…</span>
+  </button>
   <header>
     <h1>Gmail Web Viewer</h1>
-    <div class="sync-split-btn" id="sync-split-btn">
+    <div class="header-actions">
+      <button id="refresh-btn" title="Refresh message list" aria-label="Refresh message list" onclick="refreshMessages()">↺ Refresh</button>
+      <div class="sync-split-btn" id="sync-split-btn">
       <button
         id="sync-primary-btn"
         class="sync-primary"
@@ -37,7 +49,9 @@
         <li role="menuitem" tabindex="-1" onclick="runSync('delta')">⟳ Sync New Data</li>
         <li role="menuitem" tabindex="-1" onclick="runSync('force')">⟳ Sync All (Forced)</li>
         <li role="menuitem" tabindex="-1" onclick="runSync('missing')">⟳ Sync Missing</li>
+        <li role="menuitem" tabindex="-1" onclick="runSync('test')">⟳ Sync 10k (test)</li>
       </ul>
+    </div>
     </div>
   </header>
 
@@ -57,6 +71,10 @@
 
     <div id="message-detail" hidden></div>
   </main>
+
+  <footer id="db-stats-footer" class="db-stats-footer" hidden>
+    <span id="db-stats"></span>
+  </footer>
 
   <script src="/static/api.js"></script>
   <script src="/static/filters.js"></script>

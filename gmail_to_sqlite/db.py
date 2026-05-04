@@ -27,6 +27,23 @@ class DatabaseError(Exception):
     pass
 
 
+class GmailIndex(Model):
+    """Lightweight index of every known Gmail message ID.
+
+    Populated quickly from messages.list without downloading content.
+    ``synced`` is set to True once the full message has been downloaded
+    and stored in the ``messages`` table.
+    """
+
+    message_id = TextField(primary_key=True)
+    synced = BooleanField(default=False)
+    last_sync_date = DateTimeField(null=True)
+
+    class Meta:
+        database = database_proxy
+        table_name = "gmail_index"
+
+
 class Message(Model):
     """Represents an email message."""
 
@@ -73,6 +90,17 @@ class Attachment(Model):
         table_name = "attachments"
 
 
+class SyncState(Model):
+    """Stores persistent key/value sync state (e.g. the last Gmail historyId)."""
+
+    key = TextField(primary_key=True)
+    value = TextField()
+
+    class Meta:
+        database = database_proxy
+        table_name = "sync_state"
+
+
 def init(data_dir: str, enable_logging: bool = False) -> SqliteDatabase:
     """
     Initialize the database for the given data_dir.
@@ -93,7 +121,7 @@ def init(data_dir: str, enable_logging: bool = False) -> SqliteDatabase:
         db_path = f"{data_dir}/{DATABASE_FILE_NAME}"
         db = SqliteDatabase(db_path)
         database_proxy.initialize(db)
-        db.create_tables([Message, Attachment], safe=True)
+        db.create_tables([Message, Attachment, SyncState, GmailIndex], safe=True)
 
         if enable_logging:
             logger = logging.getLogger("peewee")
@@ -299,3 +327,163 @@ def get_deleted_message_ids() -> List[str]:
         ]
     except Exception as e:
         raise DatabaseError(f"Failed to retrieve deleted message IDs: {e}")
+
+
+def get_sync_state(key: str) -> Optional[str]:
+    """Return the stored value for key, or None.
+
+    Args:
+        key (str): The state key to look up (e.g. "history_id").
+
+    Returns:
+        Optional[str]: The stored value, or None if not found.
+    """
+    try:
+        row = SyncState.get_or_none(SyncState.key == key)
+        return row.value if row is not None else None
+    except Exception as e:
+        raise DatabaseError(f"Failed to get sync state for key '{key}': {e}")
+
+
+def set_sync_state(key: str, value: str) -> None:
+    """Upsert key=value into sync_state.
+
+    Args:
+        key (str): The state key (e.g. "history_id").
+        value (str): The value to store.
+
+    Raises:
+        DatabaseError: If the upsert fails.
+    """
+    try:
+        SyncState.insert(key=key, value=value).on_conflict(
+            conflict_target=[SyncState.key],
+            update={SyncState.value: value},
+        ).execute()
+    except Exception as e:
+        raise DatabaseError(f"Failed to set sync state for key '{key}': {e}")
+
+
+def get_cached_gmail_ids() -> Optional[List[str]]:
+    """Return unsynced message IDs from the gmail_index table.
+
+    Kept for backward compatibility — delegates to get_unsynced_gmail_ids.
+    """
+    return get_unsynced_gmail_ids()
+
+
+def set_cached_gmail_ids(message_ids: List[str]) -> None:
+    """Bulk-upsert message IDs into gmail_index without marking them synced.
+
+    Kept for backward compatibility — delegates to upsert_gmail_index.
+    """
+    upsert_gmail_index(message_ids)
+
+
+def upsert_gmail_index(message_ids: List[str]) -> None:
+    """Bulk-upsert message IDs into gmail_index, preserving existing synced state.
+
+    New IDs are inserted with synced=False.  Existing rows are left unchanged
+    so that already-synced messages keep their synced=True flag.
+
+    Args:
+        message_ids: List of Gmail message IDs to register.
+
+    Raises:
+        DatabaseError: If the operation fails.
+    """
+    if not message_ids:
+        return
+    try:
+        batch_size = 500
+        for i in range(0, len(message_ids), batch_size):
+            batch = message_ids[i:i + batch_size]
+            rows = [{"message_id": mid, "synced": False, "last_sync_date": None}
+                    for mid in batch]
+            # INSERT OR IGNORE — don't overwrite existing rows
+            GmailIndex.insert_many(rows).on_conflict_ignore().execute()
+    except Exception as e:
+        raise DatabaseError(f"Failed to upsert gmail_index: {e}")
+
+
+def mark_gmail_index_synced(message_ids: List[str]) -> None:
+    """Mark message IDs as synced in gmail_index.
+
+    Args:
+        message_ids: List of Gmail message IDs that have been fully downloaded.
+
+    Raises:
+        DatabaseError: If the operation fails.
+    """
+    if not message_ids:
+        return
+    try:
+        now = datetime.now()
+        batch_size = 500
+        for i in range(0, len(message_ids), batch_size):
+            batch = message_ids[i:i + batch_size]
+            placeholders = ",".join(["?" for _ in batch])
+            GmailIndex.update(synced=True, last_sync_date=now).where(
+                SQL(f"message_id IN ({placeholders})", batch)
+            ).execute()
+    except Exception as e:
+        raise DatabaseError(f"Failed to mark gmail_index synced: {e}")
+
+
+def mark_gmail_index_deleted(message_ids: List[str]) -> None:
+    """Remove message IDs from gmail_index (they no longer exist in Gmail).
+
+    Args:
+        message_ids: List of Gmail message IDs to remove from the index.
+
+    Raises:
+        DatabaseError: If the operation fails.
+    """
+    if not message_ids:
+        return
+    try:
+        batch_size = 500
+        for i in range(0, len(message_ids), batch_size):
+            batch = message_ids[i:i + batch_size]
+            placeholders = ",".join(["?" for _ in batch])
+            GmailIndex.delete().where(
+                SQL(f"message_id IN ({placeholders})", batch)
+            ).execute()
+    except Exception as e:
+        raise DatabaseError(f"Failed to remove deleted IDs from gmail_index: {e}")
+
+
+def get_unsynced_gmail_ids() -> List[str]:
+    """Return all message IDs in gmail_index where synced=False.
+
+    These are IDs known to exist in Gmail but not yet downloaded.
+
+    Returns:
+        List[str]: Unsynced message IDs.
+
+    Raises:
+        DatabaseError: If the query fails.
+    """
+    try:
+        return [
+            row.message_id
+            for row in GmailIndex.select(GmailIndex.message_id).where(
+                GmailIndex.synced == False  # noqa: E712
+            )
+        ]
+    except Exception as e:
+        raise DatabaseError(f"Failed to get unsynced gmail IDs: {e}")
+
+
+def get_gmail_index_count() -> dict:
+    """Return counts of total, synced, and unsynced IDs in gmail_index.
+
+    Returns:
+        dict with keys: total, synced, unsynced.
+    """
+    try:
+        total = GmailIndex.select().count()
+        synced = GmailIndex.select().where(GmailIndex.synced == True).count()  # noqa: E712
+        return {"total": total, "synced": synced, "unsynced": total - synced}
+    except Exception as e:
+        raise DatabaseError(f"Failed to get gmail_index counts: {e}")

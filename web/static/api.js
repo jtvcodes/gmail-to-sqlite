@@ -24,6 +24,10 @@ async function fetchLabels() {
   return _apiFetch("/api/labels");
 }
 
+async function fetchStats() {
+  return _apiFetch("/api/messages/stats");
+}
+
 async function _apiFetch(url) {
   let response;
   try {
@@ -48,4 +52,4 @@ async function _apiFetch(url) {
   return response.json();
 }
 
-const api = { fetchMessages, fetchMessage, fetchLabels };
+const api = { fetchMessages, fetchMessage, fetchLabels, fetchStats };

@@ -155,52 +155,59 @@ class TestFetchMessageMissingRawKey:
 # ---------------------------------------------------------------------------
 
 class TestFetchMessageDecodeFailure:
-    """When base64url decoding fails, log an error and return msg with raw=None."""
+    """When base64url decoding fails completely, log an error and return msg with raw=None.
+    When UTF-8 fails but latin-1 succeeds, log a warning and return msg with raw set."""
 
     def test_logs_error_when_decode_fails(self, caplog):
-        """An ERROR must be logged when the base64url decode raises an exception."""
-        # Provide a value that is not valid base64url
-        service = _make_service({"raw": "!!!not-valid-base64!!!"})
+        """A WARNING is logged when UTF-8 decode fails and latin-1 fallback is used."""
+        # Use bytes that are invalid UTF-8 but valid latin-1
+        invalid_utf8 = base64.urlsafe_b64encode(b"\x80\x81\x82").decode("ascii")
+        service = _make_service({"raw": invalid_utf8})
 
-        with caplog.at_level(logging.ERROR):
+        with caplog.at_level(logging.WARNING):
             msg = _fetch_message(service, "msg-003", _LABELS)
 
         assert any(
-            record.levelno == logging.ERROR
+            record.levelno == logging.WARNING
             for record in caplog.records
-        ), "Expected an ERROR log when decode fails"
+        ), "Expected a WARNING log when UTF-8 decode fails"
 
     def test_raw_is_none_when_decode_fails(self):
-        """The returned Message must have raw=None when base64url decoding fails."""
-        service = _make_service({"raw": "!!!not-valid-base64!!!"})
+        """raw is None only when base64url decoding itself raises (not just UTF-8 failure)."""
+        # Provide bytes that are invalid UTF-8 — latin-1 fallback sets raw to something
+        invalid_utf8 = base64.urlsafe_b64encode(b"\x80\x81\x82").decode("ascii")
+        service = _make_service({"raw": invalid_utf8})
 
         msg = _fetch_message(service, "msg-003", _LABELS)
 
-        assert msg.raw is None
+        # latin-1 fallback succeeds, so raw is not None
+        assert msg.raw is not None
 
     def test_returns_message_object_when_decode_fails(self):
-        """_fetch_message must return a Message instance even when decoding fails."""
-        service = _make_service({"raw": "!!!not-valid-base64!!!"})
+        """_fetch_message must return a Message instance even when decoding falls back."""
+        invalid_utf8 = base64.urlsafe_b64encode(b"\x80\x81\x82").decode("ascii")
+        service = _make_service({"raw": invalid_utf8})
 
         msg = _fetch_message(service, "msg-003", _LABELS)
 
         assert isinstance(msg, message_module.Message)
 
     def test_logs_error_when_utf8_decode_fails(self, caplog):
-        """An ERROR must be logged when the decoded bytes are not valid UTF-8."""
-        # Encode raw bytes that are not valid UTF-8
+        """A WARNING must be logged when UTF-8 decode fails but latin-1 fallback succeeds."""
+        # Encode raw bytes that are not valid UTF-8 but are valid latin-1
         invalid_utf8_bytes = b"\xff\xfe"
         encoded = base64.urlsafe_b64encode(invalid_utf8_bytes).decode("ascii")
         service = _make_service({"raw": encoded})
 
-        with caplog.at_level(logging.ERROR):
+        with caplog.at_level(logging.WARNING):
             msg = _fetch_message(service, "msg-004", _LABELS)
 
         assert any(
-            record.levelno == logging.ERROR
+            record.levelno == logging.WARNING and "latin-1" in record.message.lower()
             for record in caplog.records
-        ), "Expected an ERROR log when UTF-8 decode fails"
-        assert msg.raw is None
+        ), "Expected a WARNING log about latin-1 fallback"
+        # raw should be set (latin-1 decoded successfully)
+        assert msg.raw is not None
 
 
 # ---------------------------------------------------------------------------
@@ -210,21 +217,38 @@ class TestFetchMessageDecodeFailure:
 class TestAllMessagesUsesGetMessageIdsMissingRaw:
     """all_messages must call db.get_message_ids_missing_raw, not get_message_ids_missing_html."""
 
+    _common_patches = [
+        ("gmail_to_sqlite.db.get_sync_state", {"return_value": None}),
+        ("gmail_to_sqlite.db.set_sync_state", {}),
+        ("gmail_to_sqlite.db.get_cached_gmail_ids", {"return_value": None}),
+        ("gmail_to_sqlite.db.set_cached_gmail_ids", {}),
+        ("gmail_to_sqlite.db.upsert_gmail_index", {}),
+        ("gmail_to_sqlite.db.get_unsynced_gmail_ids", {"return_value": []}),
+        ("gmail_to_sqlite.db.get_gmail_index_count", {"return_value": {"total": 0, "synced": 0, "unsynced": 0}}),
+        ("gmail_to_sqlite.db.mark_gmail_index_synced", {}),
+        ("gmail_to_sqlite.db.mark_gmail_index_deleted", {}),
+    ]
+
     def test_all_messages_calls_get_message_ids_missing_raw(self):
         """all_messages must call db.get_message_ids_missing_raw during a full sync."""
         from gmail_to_sqlite import sync as sync_module
 
         mock_credentials = MagicMock()
 
-        # Provide a non-empty list so the filtering branch (which calls
-        # get_message_ids_missing_raw) is actually entered.
         with (
             patch.object(sync_module, "_create_service"),
             patch.object(sync_module, "get_labels", return_value={}),
-            patch.object(sync_module, "get_message_ids_from_gmail", return_value=["msg-001"]),
+            patch.object(sync_module, "get_message_ids_from_gmail", return_value=(["msg-001"], None)),
             patch.object(sync_module, "_detect_and_mark_deleted_messages"),
             patch("gmail_to_sqlite.db.get_all_message_ids", return_value=["msg-001"]),
             patch("gmail_to_sqlite.db.get_message_ids_missing_raw", return_value=[]) as mock_missing_raw,
+            patch("gmail_to_sqlite.db.get_sync_state", return_value=None),
+            patch("gmail_to_sqlite.db.set_sync_state"),
+            patch("gmail_to_sqlite.db.upsert_gmail_index"),
+            patch("gmail_to_sqlite.db.get_unsynced_gmail_ids", return_value=[]),
+            patch("gmail_to_sqlite.db.get_gmail_index_count", return_value={"total": 0, "synced": 0, "unsynced": 0}),
+            patch("gmail_to_sqlite.db.mark_gmail_index_synced"),
+            patch("gmail_to_sqlite.db.mark_gmail_index_deleted"),
         ):
             sync_module.all_messages(
                 mock_credentials,
@@ -242,7 +266,6 @@ class TestAllMessagesUsesGetMessageIdsMissingRaw:
 
         mock_credentials = MagicMock()
 
-        # Ensure the old function doesn't exist on the db module
         assert not hasattr(db_module, "get_message_ids_missing_html"), (
             "db.get_message_ids_missing_html should not exist; "
             "it must have been replaced by get_message_ids_missing_raw"
@@ -251,12 +274,18 @@ class TestAllMessagesUsesGetMessageIdsMissingRaw:
         with (
             patch.object(sync_module, "_create_service"),
             patch.object(sync_module, "get_labels", return_value={}),
-            patch.object(sync_module, "get_message_ids_from_gmail", return_value=[]),
+            patch.object(sync_module, "get_message_ids_from_gmail", return_value=([], None)),
             patch.object(sync_module, "_detect_and_mark_deleted_messages"),
             patch("gmail_to_sqlite.db.get_all_message_ids", return_value=[]),
             patch("gmail_to_sqlite.db.get_message_ids_missing_raw", return_value=[]),
+            patch("gmail_to_sqlite.db.get_sync_state", return_value=None),
+            patch("gmail_to_sqlite.db.set_sync_state"),
+            patch("gmail_to_sqlite.db.upsert_gmail_index"),
+            patch("gmail_to_sqlite.db.get_unsynced_gmail_ids", return_value=[]),
+            patch("gmail_to_sqlite.db.get_gmail_index_count", return_value={"total": 0, "synced": 0, "unsynced": 0}),
+            patch("gmail_to_sqlite.db.mark_gmail_index_synced"),
+            patch("gmail_to_sqlite.db.mark_gmail_index_deleted"),
         ):
-            # Should not raise AttributeError for missing_html
             sync_module.all_messages(
                 mock_credentials,
                 data_dir="/tmp",

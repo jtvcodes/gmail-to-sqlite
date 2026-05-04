@@ -4,6 +4,8 @@
 
 This feature redesigns the Gmail Web Viewer's user interface from its current minimal, utility-first style into a modern, Notion-inspired layout with a full visual overhaul, structural improvements, and built-in dark/light mode support. The redesign targets improved readability, spatial hierarchy, and discoverability while preserving all existing functionality (sync, filtering, message list, message detail, attachments). UX improvements — such as a collapsible sidebar, command palette, keyboard-first navigation, and contextual inline previews — are included as first-class requirements.
 
+All new UI work SHALL be developed under the `webv2/` folder (mirroring the structure of `web/`) so that the existing `web/` application is not affected. Once the redesign is approved, the contents of `webv2/` will be migrated into `web/`.
+
 ---
 
 ## Glossary

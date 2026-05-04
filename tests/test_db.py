@@ -13,9 +13,10 @@ from gmail_to_sqlite.message import Attachment as AttachmentData
 @pytest.fixture
 def in_memory_db():
     """Set up an in-memory SQLite database for testing."""
+    from gmail_to_sqlite.db import SyncState
     db = SqliteDatabase(":memory:")
     database_proxy.initialize(db)
-    db.create_tables([Message, Attachment])
+    db.create_tables([Message, Attachment, SyncState])
     yield db
     db.close()
 

@@ -72,7 +72,12 @@ function render() {
       if (message.has_attachments) {
         const clip = document.createElement("span");
         clip.textContent = " 📎";
-        clip.title = "Has attachments";
+        clip.title = "View attachments";
+        clip.className = "attachment-clip";
+        clip.addEventListener("click", function (e) {
+          e.stopPropagation(); // don't open the message
+          openAttachmentPopover(clip, message.message_id);
+        });
         subjectCell.appendChild(clip);
       }
       tr.appendChild(subjectCell);
@@ -129,3 +134,133 @@ function render() {
 }
 
 const messageList = { render, getDisplayDate };
+
+/**
+ * Fetches attachments for a message and shows a popover near the clip icon.
+ */
+async function openAttachmentPopover(anchor, messageId) {
+  // Remove any existing popover
+  const existing = document.getElementById("attachment-popover");
+  if (existing) {
+    existing.remove();
+    // If clicking the same clip again, just close
+    if (existing.dataset.messageId === messageId) return;
+  }
+
+  const popover = document.createElement("div");
+  popover.id = "attachment-popover";
+  popover.className = "attachment-popover";
+  popover.dataset.messageId = messageId;
+  popover.textContent = "Loading…";
+  document.body.appendChild(popover);
+
+  // Position near the anchor
+  function reposition() {
+    const rect = anchor.getBoundingClientRect();
+    const scrollY = window.scrollY || document.documentElement.scrollTop;
+    const scrollX = window.scrollX || document.documentElement.scrollLeft;
+    popover.style.top = (rect.bottom + scrollY + 6) + "px";
+    popover.style.left = (rect.left + scrollX) + "px";
+  }
+  reposition();
+
+  // Close on outside click
+  function onOutsideClick(e) {
+    if (!popover.contains(e.target) && e.target !== anchor) {
+      popover.remove();
+      document.removeEventListener("click", onOutsideClick);
+      document.removeEventListener("keydown", onEscape);
+    }
+  }
+  function onEscape(e) {
+    if (e.key === "Escape") {
+      popover.remove();
+      document.removeEventListener("click", onOutsideClick);
+      document.removeEventListener("keydown", onEscape);
+    }
+  }
+  setTimeout(function () {
+    document.addEventListener("click", onOutsideClick);
+    document.addEventListener("keydown", onEscape);
+  }, 0);
+
+  // Fetch message detail to get attachments
+  let attachments = [];
+  try {
+    const data = await api.fetchMessage(messageId);
+    attachments = (data.attachments || []).filter(function (a) {
+      return a.filename && !a.mime_type.startsWith("multipart/");
+    });
+  } catch (err) {
+    popover.textContent = "Failed to load attachments.";
+    return;
+  }
+
+  popover.innerHTML = "";
+
+  if (attachments.length === 0) {
+    popover.textContent = "No attachments found.";
+    return;
+  }
+
+  // Stamp message_id on each attachment for the preview modal URL builder
+  const taggedAttachments = attachments.map(function (a) {
+    return Object.assign({}, a, { _messageId: messageId });
+  });
+
+  const title = document.createElement("div");
+  title.className = "attachment-popover-title";
+  title.textContent = taggedAttachments.length + " attachment" + (taggedAttachments.length !== 1 ? "s" : "");
+  popover.appendChild(title);
+
+  taggedAttachments.forEach(function (att, i) {
+    const dataUrl = att.attachment_id
+      ? "/api/messages/" + messageId + "/attachments/" + att.attachment_id + "/data"
+      : "/api/messages/" + messageId + "/attachments/by-filename/" + encodeURIComponent(att.filename) + "/data";
+
+    const item = document.createElement("div");
+    item.className = "attachment-popover-item";
+
+    const icon = document.createElement("span");
+    icon.textContent = attachmentIcon(att.mime_type);
+    icon.className = "attachment-popover-icon";
+
+    const name = document.createElement("span");
+    name.className = "attachment-popover-name";
+    name.textContent = att.filename;
+
+    const kb = att.size ? Math.ceil(att.size / 1024) + " KB" : "";
+    if (kb) {
+      const size = document.createElement("span");
+      size.className = "attachment-popover-size";
+      size.textContent = kb;
+      item.appendChild(icon);
+      item.appendChild(name);
+      item.appendChild(size);
+    } else {
+      item.appendChild(icon);
+      item.appendChild(name);
+    }
+
+    item.addEventListener("click", function (e) {
+      e.stopPropagation();
+      popover.remove();
+      document.removeEventListener("click", onOutsideClick);
+      document.removeEventListener("keydown", onEscape);
+      if (isPreviewable(att.mime_type)) {
+        openAttachmentPreview(att, dataUrl, taggedAttachments, i);
+      } else {
+        const a = document.createElement("a");
+        a.href = dataUrl;
+        a.download = att.filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
+    });
+
+    popover.appendChild(item);
+  });
+
+  reposition();
+}

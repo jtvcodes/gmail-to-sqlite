@@ -5,6 +5,7 @@ import os
 import socket
 import threading
 import time
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from googleapiclient.discovery import build
@@ -19,6 +20,7 @@ from .constants import (
     RETRY_DELAY_SECONDS,
     PROGRESS_LOG_INTERVAL,
     COLLECTION_LOG_INTERVAL,
+    DB_WRITE_BATCH_SIZE,
 )
 
 
@@ -47,21 +49,74 @@ def _get_thread_service(credentials: Any) -> Any:
     return _thread_local.service
 
 
-def _save_attachments_to_disk(service: Any, msg: Any, data_dir: str) -> None:
-    """Download real attachments to data/attachments/<message_id>/ while tokens are fresh.
+def _resolve_attachment_ids(service: Any, message_id: str, attachments: List) -> None:
+    """Fetch the Gmail API JSON payload to resolve attachment_ids by filename.
 
-    Skips attachments that are already cached, have no filename, or have no
-    attachment_id (inline data is already stored in the DB).
+    Called when attachments were parsed from RFC 2822 source and have no
+    attachment_id.  Mutates the attachment objects in-place.
     """
+    try:
+        result = service.users().messages().get(
+            userId="me", id=message_id, format="full"
+        ).execute()
+        payload = result.get("payload", {})
+
+        def _walk(parts):
+            for part in parts:
+                att_id = part.get("body", {}).get("attachmentId")
+                if not att_id:
+                    if "parts" in part:
+                        _walk(part["parts"])
+                    continue
+                # Match by filename
+                part_filename = None
+                for h in part.get("headers", []):
+                    if h["name"].lower() == "content-disposition":
+                        import email.message as _em
+                        m = _em.Message()
+                        m["Content-Disposition"] = h["value"]
+                        part_filename = m.get_param("filename", header="content-disposition")
+                if part_filename is None:
+                    for h in part.get("headers", []):
+                        if h["name"].lower() == "content-type":
+                            import email.message as _em
+                            m = _em.Message()
+                            m["Content-Type"] = h["value"]
+                            part_filename = m.get_param("name")
+                if part_filename:
+                    for att in attachments:
+                        if att.attachment_id is None and att.filename == part_filename:
+                            att.attachment_id = att_id
+                if "parts" in part:
+                    _walk(part["parts"])
+
+        _walk(payload.get("parts", []))
+    except Exception as e:
+        logging.warning(f"Could not resolve attachment IDs for message {message_id}: {e}")
+
+
+def _save_attachments_to_disk(service: Any, msg: Any, data_dir: str) -> None:
+    """Download real attachments to data/attachments/<message_id>/ while tokens are fresh."""
     attachments = getattr(msg, "attachments", [])
     if not attachments:
         return
 
-    for att in attachments:
-        # Skip MIME container parts and attachments without a usable filename/id
-        if not att.filename or not att.attachment_id:
-            continue
-        if att.mime_type.startswith("multipart/"):
+    # Filter to attachments that have a filename and aren't multipart containers
+    candidates = [
+        att for att in attachments
+        if att.filename and not att.mime_type.startswith("multipart/")
+    ]
+    if not candidates:
+        return
+
+    # If any attachment is missing an attachment_id (parsed from RFC 2822),
+    # fetch the Gmail API JSON payload once to resolve them all by filename.
+    if any(att.attachment_id is None for att in candidates):
+        _resolve_attachment_ids(service, msg.id, candidates)
+
+    for att in candidates:
+        if not att.attachment_id:
+            logging.warning(f"No attachment_id for {att.filename} in message {msg.id}, skipping")
             continue
 
         cache_dir = os.path.join(data_dir, "attachments", msg.id)
@@ -144,7 +199,14 @@ def _fetch_message(
                 return msg
 
             try:
-                decoded_str = base64.urlsafe_b64decode(raw_msg["raw"]).decode("utf-8")
+                raw_bytes = base64.urlsafe_b64decode(raw_msg["raw"])
+                try:
+                    decoded_str = raw_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    logging.warning(
+                        f"UTF-8 decode failed for message {message_id}, falling back to latin-1"
+                    )
+                    decoded_str = raw_bytes.decode("latin-1")
             except Exception as decode_err:
                 logging.error(
                     f"Failed to decode base64url payload for message {message_id}: {decode_err}"
@@ -259,7 +321,7 @@ def get_message_ids_from_gmail(
     query: Optional[List[str]] = None,
     limit: Optional[int] = None,
     check_shutdown: Optional[Callable[[], bool]] = None,
-) -> List[str]:
+) -> tuple:
     """
     Fetches message IDs from Gmail matching the query.
 
@@ -270,7 +332,9 @@ def get_message_ids_from_gmail(
         check_shutdown: Callback that returns True if shutdown is requested.
 
     Returns:
-        List[str]: List of message IDs from Gmail.
+        Tuple[List[str], Optional[str]]: (message_ids, history_id) where history_id
+        is the historyId from the first page response (or from getProfile if absent),
+        or None if unavailable.
 
     Raises:
         SyncError: If message ID collection fails.
@@ -278,6 +342,8 @@ def get_message_ids_from_gmail(
     all_message_ids = []
     page_token = None
     collected_count = 0
+    captured_history_id: Optional[str] = None
+    first_page = True
 
     if limit is not None:
         logging.info(f"Collecting up to {limit} message ID(s) from Gmail...")
@@ -300,20 +366,49 @@ def get_message_ids_from_gmail(
                 list_params["q"] = " | ".join(query)
 
             results = service.users().messages().list(**list_params).execute()
+
+            # Capture historyId from the first page response
+            if first_page:
+                first_page = False
+                captured_history_id = results.get("historyId") or None
+                if captured_history_id is None:
+                    # Fall back to getProfile for the current historyId
+                    try:
+                        profile = service.users().getProfile(userId="me").execute()
+                        captured_history_id = profile.get("historyId") or None
+                    except Exception as profile_err:
+                        logging.warning(f"Could not fetch historyId from getProfile: {profile_err}")
+
             messages_page = results.get("messages", [])
+            page_ids = []
 
             for m_info in messages_page:
-                all_message_ids.append(m_info["id"])
+                mid = m_info["id"]
+                all_message_ids.append(mid)
+                page_ids.append(mid)
                 collected_count += 1
 
                 if limit is not None and collected_count >= limit:
                     logging.info(f"Reached limit of {limit} message ID(s).")
-                    return all_message_ids
+                    # Persist this partial page before returning
+                    if page_ids:
+                        try:
+                            db.upsert_gmail_index(page_ids)
+                        except Exception as idx_err:
+                            logging.warning(f"Could not update gmail_index: {idx_err}")
+                    return all_message_ids, captured_history_id
 
                 if collected_count % COLLECTION_LOG_INTERVAL == 0:
                     logging.info(
                         f"Collected {collected_count} message IDs from Gmail..."
                     )
+
+            # Persist each page to gmail_index as it arrives
+            if page_ids:
+                try:
+                    db.upsert_gmail_index(page_ids)
+                except Exception as idx_err:
+                    logging.warning(f"Could not update gmail_index: {idx_err}")
 
             page_token = results.get("nextPageToken")
             if not page_token:
@@ -328,10 +423,167 @@ def get_message_ids_from_gmail(
         logging.info(
             "Shutdown requested during message ID collection. Exiting gracefully."
         )
-        return []
+        return [], None
 
     logging.info(f"Collected {len(all_message_ids)} message IDs from Gmail")
-    return all_message_ids
+    return all_message_ids, captured_history_id
+
+
+def get_changed_message_ids_from_history(
+    service: Any,
+    start_history_id: str,
+    check_shutdown: Optional[Callable[[], bool]] = None,
+) -> tuple:
+    """
+    Use the Gmail History API to get changes since start_history_id.
+
+    Returns:
+        Tuple[List[str], List[str], List[tuple], Optional[str]]:
+            (added_ids, deleted_ids, label_changes, latest_history_id)
+            - added_ids: message IDs that were added/received
+            - deleted_ids: message IDs that were permanently deleted
+            - label_changes: list of (message_id, label_ids_added, label_ids_removed)
+            - latest_history_id: the most recent historyId seen, or None
+
+    Raises:
+        SyncError: With history_expired=True when Gmail returns 404 (history too old).
+        SyncError: For other API errors.
+    """
+    added_ids: List[str] = []
+    deleted_ids: List[str] = []
+    label_changes: List[tuple] = []
+    latest_history_id: Optional[str] = None
+    page_token = None
+
+    logging.info(f"Fetching history since historyId={start_history_id}...")
+
+    try:
+        while not (check_shutdown and check_shutdown()):
+            list_params: dict = {
+                "userId": "me",
+                "startHistoryId": start_history_id,
+                "historyTypes": ["messageAdded", "messageDeleted", "labelAdded", "labelRemoved"],
+            }
+            if page_token:
+                list_params["pageToken"] = page_token
+
+            results = service.users().history().list(**list_params).execute()
+
+            page_history_id = results.get("historyId")
+            if page_history_id:
+                latest_history_id = page_history_id
+
+            for record in results.get("history", []):
+                for added in record.get("messagesAdded", []):
+                    msg_id = added.get("message", {}).get("id")
+                    if msg_id:
+                        added_ids.append(msg_id)
+                for deleted in record.get("messagesDeleted", []):
+                    msg_id = deleted.get("message", {}).get("id")
+                    if msg_id:
+                        deleted_ids.append(msg_id)
+                for lbl_added in record.get("labelsAdded", []):
+                    msg_id = lbl_added.get("message", {}).get("id")
+                    added_labels = lbl_added.get("labelIds", [])
+                    if msg_id and added_labels:
+                        label_changes.append((msg_id, added_labels, []))
+                for lbl_removed in record.get("labelsRemoved", []):
+                    msg_id = lbl_removed.get("message", {}).get("id")
+                    removed_labels = lbl_removed.get("labelIds", [])
+                    if msg_id and removed_labels:
+                        label_changes.append((msg_id, [], removed_labels))
+
+            page_token = results.get("nextPageToken")
+            if not page_token:
+                break
+
+    except HttpError as e:
+        if e.resp.status == 404:
+            err = SyncError(f"Gmail history expired (404): {e}")
+            err.history_expired = True  # type: ignore[attr-defined]
+            raise err
+        raise SyncError(f"History API error {e.resp.status}: {e}")
+    except SyncError:
+        raise
+    except Exception as e:
+        raise SyncError(f"Failed to fetch history: {e}")
+
+    logging.info(
+        f"History sync: {len(added_ids)} added, {len(deleted_ids)} deleted, "
+        f"{len(label_changes)} label changes, latest historyId={latest_history_id}"
+    )
+    return added_ids, deleted_ids, label_changes, latest_history_id
+
+
+def _apply_history_label_changes(
+    label_changes: List[tuple],
+    labels: Dict[str, str],
+) -> None:
+    """Apply label/read/delete changes from history to already-synced messages.
+
+    Args:
+        label_changes: List of (message_id, added_label_ids, removed_label_ids).
+        labels: Mapping of label ID → label name.
+    """
+    if not label_changes:
+        return
+
+    # Consolidate changes per message_id
+    changes_by_id: Dict[str, Dict] = {}
+    for msg_id, added, removed in label_changes:
+        if msg_id not in changes_by_id:
+            changes_by_id[msg_id] = {"added": set(), "removed": set()}
+        changes_by_id[msg_id]["added"].update(added)
+        changes_by_id[msg_id]["removed"].update(removed)
+
+    updated = 0
+    for msg_id, change in changes_by_id.items():
+        try:
+            row = db.Message.get_or_none(db.Message.message_id == msg_id)
+            if row is None:
+                continue  # not yet downloaded — will be handled when synced
+
+            added_ids = change["added"]
+            removed_ids = change["removed"]
+
+            # Determine new is_read state
+            is_read = row.is_read
+            if "UNREAD" in added_ids:
+                is_read = False
+            if "UNREAD" in removed_ids:
+                is_read = True
+
+            # Determine is_deleted state
+            is_deleted = row.is_deleted
+            if "TRASH" in added_ids or "SPAM" in added_ids:
+                is_deleted = True
+            if "TRASH" in removed_ids or "SPAM" in removed_ids:
+                is_deleted = False
+
+            # Rebuild labels list
+            current_label_ids = set()
+            # Map current label names back to IDs for manipulation
+            name_to_id = {v: k for k, v in labels.items()}
+            for lbl_name in (row.labels or []):
+                lid = name_to_id.get(lbl_name)
+                if lid:
+                    current_label_ids.add(lid)
+            current_label_ids.update(added_ids)
+            current_label_ids -= removed_ids
+            new_labels = [labels[lid] for lid in current_label_ids if lid in labels]
+
+            db.Message.update(
+                is_read=is_read,
+                is_deleted=is_deleted,
+                labels=new_labels,
+                last_indexed=datetime.now(),
+            ).where(db.Message.message_id == msg_id).execute()
+            updated += 1
+        except Exception as e:
+            logging.warning(f"Could not apply label change for {msg_id}: {e}")
+
+    if updated:
+        logging.info(f"Applied label/read/delete changes to {updated} messages.")
 
 
 def _detect_and_mark_deleted_messages(
@@ -401,10 +653,14 @@ def all_messages(
     num_workers: int = 4,
     limit: Optional[int] = None,
     check_shutdown: Optional[Callable[[], bool]] = None,
+    verbose: bool = False,
 ) -> int:
     """
     Fetches messages from the Gmail API using the provided credentials, in parallel.
     Also detects and marks deleted messages.
+
+    On subsequent runs (full_sync=True, force=False), uses the Gmail History API
+    to perform an incremental sync instead of re-paginating all message IDs.
 
     Args:
         credentials (object): The credentials object used to authenticate the API request.
@@ -436,37 +692,92 @@ def all_messages(
         if not full_sync:
             last = db.last_indexed()
             if last:
-                # Only fetch messages newer than the most recently indexed one
                 query.append(f"after:{_safe_timestamp(last)}")
         service = _create_service(credentials)
         labels = get_labels(service)
 
-        all_message_ids = get_message_ids_from_gmail(service, query, limit=limit, check_shutdown=check_shutdown)
-        if check_shutdown and check_shutdown():
-            logging.info(
-                "Shutdown requested during message ID collection. Exiting gracefully."
-            )
-            return 0
+        # ── Step 1: Apply history changes (read/delete/label updates) ──────────
+        stored_history_id = db.get_sync_state("history_id")
+        if stored_history_id is not None and not force:
+            try:
+                added_ids, deleted_ids, label_changes, new_history_id = \
+                    get_changed_message_ids_from_history(
+                        service, stored_history_id, check_shutdown=check_shutdown
+                    )
+                # Apply label/read/delete changes to already-synced messages
+                _apply_history_label_changes(label_changes, labels)
+                # Mark deleted in both tables
+                if deleted_ids:
+                    db.mark_messages_as_deleted(deleted_ids)
+                    db.mark_gmail_index_deleted(deleted_ids)
+                # Register newly added IDs in the index (synced=False)
+                if added_ids:
+                    db.upsert_gmail_index(added_ids)
+                if new_history_id:
+                    db.set_sync_state("history_id", new_history_id)
+                logging.info(
+                    f"History applied: {len(added_ids)} new, {len(deleted_ids)} deleted, "
+                    f"{len(label_changes)} label changes."
+                )
+            except SyncError as e:
+                if getattr(e, "history_expired", False):
+                    logging.warning("History expired — will refresh full ID list.")
+                    stored_history_id = None
+                else:
+                    raise
 
-        if full_sync:
-            _detect_and_mark_deleted_messages(all_message_ids, check_shutdown)
+        # ── Step 2: Collect all Gmail IDs if needed ───────────────────────────
+        # Needed when: first run, history expired, --force, or --delta
+        index_count = db.get_gmail_index_count()
+        needs_full_list = (
+            force
+            or not full_sync
+            or stored_history_id is None
+            or index_count["total"] == 0
+        )
 
-        # For full sync, skip IDs already in the DB to avoid re-fetching,
-        # EXCEPT for messages where raw is NULL (need to fetch raw source).
-        # --force skips all filtering and re-fetches everything.
-        if full_sync and all_message_ids and not force:
-            known_ids = set(db.get_all_message_ids())
-            needs_raw_fix = set(db.get_message_ids_missing_raw())
-            missing_ids = [mid for mid in all_message_ids if mid not in known_ids or mid in needs_raw_fix]
-            logging.info(
-                f"Full sync: {len(all_message_ids)} total in Gmail, "
-                f"{len(known_ids)} already in DB, "
-                f"{len(needs_raw_fix)} missing raw, "
-                f"{len(missing_ids)} to fetch."
+        if needs_full_list:
+            logging.info("Collecting full Gmail ID list...")
+            all_gmail_ids, new_history_id = get_message_ids_from_gmail(
+                service, query, limit=limit, check_shutdown=check_shutdown
             )
-            all_message_ids = missing_ids
-        elif force:
-            logging.info(f"Force sync: re-fetching all {len(all_message_ids)} messages.")
+            if check_shutdown and check_shutdown():
+                logging.info("Shutdown requested during ID collection. Exiting.")
+                return 0
+            if new_history_id:
+                db.set_sync_state("history_id", new_history_id)
+            # IDs already upserted per-page inside get_message_ids_from_gmail.
+            # Detect deletions for full syncs (not limited test runs).
+            if full_sync and not limit:
+                _detect_and_mark_deleted_messages(all_gmail_ids, check_shutdown)
+            if force:
+                logging.info(f"Force sync: re-downloading all {len(all_gmail_ids)} messages.")
+                all_message_ids = all_gmail_ids
+            else:
+                all_message_ids = all_gmail_ids  # will be filtered below
+        else:
+            all_message_ids = []
+
+        # ── Step 3: Determine what to actually download ───────────────────────
+        if force:
+            # Re-download everything
+            pass  # all_message_ids already set above
+        else:
+            # Download: unsynced from index + messages missing raw
+            unsynced = set(db.get_unsynced_gmail_ids())
+            needs_raw = set(db.get_message_ids_missing_raw())
+            if needs_full_list:
+                # Intersect with what Gmail returned (respects --delta / limit)
+                gmail_set = set(all_message_ids)
+                all_message_ids = list((unsynced | needs_raw) & gmail_set)
+            else:
+                # History path already updated the index — just fetch unsynced
+                all_message_ids = list(unsynced | needs_raw)
+
+            logging.info(
+                f"To fetch: {len(all_message_ids)} "
+                f"({len(unsynced)} unsynced, {len(needs_raw)} missing raw)."
+            )
 
         # Apply test limit as a safety net (collection should already be limited)
         if limit is not None and len(all_message_ids) > limit:
@@ -477,47 +788,71 @@ def all_messages(
         total_synced_count = 0
         processed_count = 0
 
-        def thread_worker(message_id: str) -> bool:
+        # Each worker fetches a message and returns the parsed Message object
+        # (or None on failure).  DB writes are batched on the main thread to
+        # avoid per-message SQLite lock contention.
+        def thread_worker(message_id: str):
+            """Fetch one message and return (message_id, msg) or (message_id, None)."""
             if check_shutdown and check_shutdown():
-                return False
+                return message_id, None
 
-            service = _get_thread_service(credentials)
-
+            svc = _get_thread_service(credentials)
             try:
-                msg = _fetch_message(
-                    service,
-                    message_id,
-                    labels,
-                    check_interrupt=check_shutdown,
-                )
-                try:
-                    db.create_message(msg)
-                    logging.info(
-                        f"Successfully synced message {msg.id} (Original ID: {message_id}) from {msg.timestamp}"
-                    )
-                    # Download attachments to disk while tokens are still fresh
-                    _save_attachments_to_disk(service, msg, data_dir)
-                    return True
-                except IntegrityError as e:
-                    logging.error(
-                        f"Could not process message {message_id} due to integrity error: {str(e)}"
-                    )
-                    return False
+                msg = _fetch_message(svc, message_id, labels, check_interrupt=check_shutdown)
+                return message_id, msg
             except InterruptedError:
-                logging.info(f"Message fetch for {message_id} was interrupted")
-                return False
+                return message_id, None
+            except SyncError:
+                raise
             except Exception as e:
-                logging.error(f"Failed to fetch message {message_id}: {str(e)}")
-                return False
+                logging.error(f"Failed to fetch message {message_id}: {e}")
+                return message_id, None
 
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=num_workers
-        ) as executor_instance:
-            executor = executor_instance
+        def flush_batch(batch):
+            """Write a batch of (message_id, msg) pairs atomically.
+
+            All message writes happen inside a single SQLite transaction.
+            mark_gmail_index_synced is only called after every write in the
+            batch has committed successfully — never on a partial batch.
+            """
+            if not batch:
+                return 0
+
+            from playhouse.sqlite_ext import SqliteDatabase as _SqliteDb
+            conn = db.database_proxy.obj  # the underlying SqliteDatabase
+
+            successfully_saved = []
+            with conn.atomic():
+                for mid, msg in batch:
+                    try:
+                        db.create_message(msg)
+                        successfully_saved.append(mid)
+                        if verbose:
+                            logging.info(
+                                f"Successfully synced message {msg.id} from {msg.timestamp}"
+                            )
+                        else:
+                            logging.info(f"Successfully synced message {mid}")
+                    except (db.DatabaseError, IntegrityError) as e:
+                        # Roll back the whole transaction and propagate
+                        raise SyncError(
+                            f"Database error saving message {mid}: {e}"
+                        ) from e
+
+            # Only reached if the entire transaction committed cleanly
+            if successfully_saved:
+                db.mark_gmail_index_synced(successfully_saved)
+
+            return len(successfully_saved)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor_instance:
             future_to_id = {
-                executor.submit(thread_worker, msg_id): msg_id
+                executor_instance.submit(thread_worker, msg_id): msg_id
                 for msg_id in all_message_ids
             }
+
+            pending_batch = []   # list of (message_id, msg) ready to write
+            db_error = None
 
             for future in concurrent.futures.as_completed(future_to_id):
                 if check_shutdown and check_shutdown():
@@ -525,25 +860,48 @@ def all_messages(
 
                 message_id = future_to_id[future]
                 processed_count += 1
+
                 try:
-                    if not future.cancelled():
-                        if future.result():
-                            total_synced_count += 1
+                    if future.cancelled():
+                        continue
+                    mid, msg = future.result()
+                    if msg is not None:
+                        pending_batch.append((mid, msg))
+
+                    # Flush batch when it reaches the target size
+                    if len(pending_batch) >= DB_WRITE_BATCH_SIZE:
+                        total_synced_count += flush_batch(pending_batch)
+                        pending_batch = []
+
                     if (
                         processed_count % PROGRESS_LOG_INTERVAL == 0
                         or processed_count == len(all_message_ids)
                     ):
                         logging.info(
-                            f"Processed {processed_count}/{len(all_message_ids)} messages..."
+                            f"Processed {processed_count}/{len(all_message_ids)} messages "
+                            f"({total_synced_count + len(pending_batch)} saved)..."
                         )
+
                 except concurrent.futures.CancelledError:
-                    logging.info(
-                        f"Task for message {message_id} was cancelled due to shutdown"
-                    )
+                    pass
+                except SyncError as exc:
+                    logging.error(f"Database error for message {message_id}: {exc}. Stopping sync.")
+                    db_error = exc
+                    for f in future_to_id:
+                        f.cancel()
+                    break
                 except Exception as exc:
-                    logging.error(
-                        f"Message ID {message_id} generated an exception during future processing: {exc}"
-                    )
+                    logging.error(f"Unexpected error processing {message_id}: {exc}")
+
+            # Flush any remaining messages
+            if pending_batch and db_error is None:
+                try:
+                    total_synced_count += flush_batch(pending_batch)
+                except SyncError as exc:
+                    db_error = exc
+
+            if db_error is not None:
+                raise db_error
 
         if check_shutdown and check_shutdown():
             logging.info("Sync process was interrupted. Partial results saved.")
@@ -574,7 +932,7 @@ def sync_deleted_messages(
     """
     try:
         service = _create_service(credentials)
-        gmail_message_ids = get_message_ids_from_gmail(
+        gmail_message_ids, _ = get_message_ids_from_gmail(
             service, check_shutdown=check_shutdown
         )
 
@@ -630,8 +988,6 @@ def single_message(
             logging.info(
                 f"Successfully synced message {msg.id} (Original ID: {message_id}) from {msg.timestamp}"
             )
-            if data_dir:
-                _save_attachments_to_disk(service, msg, data_dir)
         except IntegrityError as e:
             logging.error(
                 f"Could not process message {message_id} due to integrity error: {str(e)}"

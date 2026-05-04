@@ -14,15 +14,31 @@ _INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_messages_is_deleted "
     "ON messages (is_deleted)",
 
-    # Every page load sorts by timestamp.  The composite index covers the
-    # most common query pattern (non-deleted rows in timestamp order) so
-    # SQLite can satisfy ORDER BY + WHERE is_deleted=0 with a single index
-    # scan instead of a full table scan + sort.
+    # The UI sorts by COALESCE(received_date, timestamp). SQLite cannot use a
+    # plain column index for an expression, so we add a generated column that
+    # pre-computes the value and index that instead.  The column is VIRTUAL
+    # (not stored) so it costs no extra disk space.
+    "ALTER TABLE messages ADD COLUMN sort_date TEXT "
+    "GENERATED ALWAYS AS (COALESCE(received_date, timestamp)) VIRTUAL",
+
+    # Covering index for the default page load: non-deleted rows in sort_date
+    # order.  SQLite can satisfy WHERE is_deleted=0 ORDER BY sort_date with a
+    # single index scan — no filesort needed.
+    "CREATE INDEX IF NOT EXISTS idx_messages_deleted_sort_date "
+    "ON messages (is_deleted, sort_date)",
+
+    # Descending variant so both sort directions use an index scan.
+    "CREATE INDEX IF NOT EXISTS idx_messages_deleted_sort_date_desc "
+    "ON messages (is_deleted, sort_date DESC)",
+
+    # Standalone sort_date index used when other filters are active.
+    "CREATE INDEX IF NOT EXISTS idx_messages_sort_date "
+    "ON messages (sort_date)",
+
+    # Legacy timestamp indexes kept for any direct timestamp queries.
     "CREATE INDEX IF NOT EXISTS idx_messages_deleted_timestamp "
     "ON messages (is_deleted, timestamp)",
 
-    # Standalone timestamp index used when other filters are active and the
-    # query planner cannot use the composite index for the ORDER BY.
     "CREATE INDEX IF NOT EXISTS idx_messages_timestamp "
     "ON messages (timestamp)",
 
@@ -33,6 +49,11 @@ _INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_messages_is_outgoing "
     "ON messages (is_outgoing)",
 
+    # Covering index for the has_attachments EXISTS subquery.
+    # SQLite can resolve the subquery with an index-only scan on this index.
+    "CREATE INDEX IF NOT EXISTS idx_attachments_message_id_covering "
+    "ON attachments (message_id, filename, attachment_id, mime_type)",
+
     # content_id lookup used when resolving cid: inline images in message bodies.
     "CREATE INDEX IF NOT EXISTS idx_attachments_content_id "
     "ON attachments (content_id)",
@@ -42,8 +63,7 @@ _INDEX_STATEMENTS = [
 def ensure_indexes(db_path: str) -> None:
     """Create performance indexes on the messages database if they don't exist.
 
-    Called once at application startup.  Uses a direct connection (not the
-    per-request ``get_db`` connection) so it runs outside any request context.
+    Called once at application startup and again after sync completes.
     Safe to call repeatedly — all statements use IF NOT EXISTS.
     """
     try:
@@ -53,8 +73,10 @@ def ensure_indexes(db_path: str) -> None:
                 try:
                     conn.execute(stmt)
                 except sqlite3.OperationalError:
-                    # Table may not exist yet (fresh install before first sync).
-                    # Indexes will be created on the next startup after sync.
+                    # Silently skip:
+                    #  - Table/column doesn't exist yet (fresh install before first sync)
+                    #  - Generated column already added (server restart)
+                    #  - Index already exists (IF NOT EXISTS handles this, but belt-and-suspenders)
                     pass
             conn.commit()
         finally:
@@ -62,6 +84,17 @@ def ensure_indexes(db_path: str) -> None:
     except Exception:
         # Never crash the server over a missing index.
         pass
+
+
+def has_sort_date_column(conn: sqlite3.Connection) -> bool:
+    """Return True if the messages table has the sort_date generated column."""
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM pragma_table_info('messages') WHERE name='sort_date'"
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
 
 
 def get_db() -> sqlite3.Connection:
@@ -78,6 +111,12 @@ def get_db() -> sqlite3.Connection:
             detect_types=sqlite3.PARSE_DECLTYPES,
         )
         g.db.row_factory = sqlite3.Row
+        # WAL mode allows concurrent reads without blocking writes, and a
+        # larger page cache reduces disk I/O on repeated queries.
+        g.db.execute("PRAGMA journal_mode=WAL")
+        g.db.execute("PRAGMA cache_size=-32000")   # ~32 MB
+        g.db.execute("PRAGMA temp_store=MEMORY")
+        g.db.execute("PRAGMA synchronous=NORMAL")  # safe with WAL, faster than FULL
     return g.db
 
 

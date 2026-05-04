@@ -146,8 +146,16 @@ function render() {
     const attachDiv = document.createElement("div");
     attachDiv.className = "detail-attachments";
 
-    attachments.forEach(function (att) {
-      const dataUrl = "/api/messages/" + msg.message_id + "/attachments/" + att.attachment_id + "/data";
+    // Stamp message_id on each attachment so the preview modal can build URLs
+    const taggedAttachments = attachments.map(function (a) {
+      return Object.assign({}, a, { _messageId: msg.message_id });
+    });
+
+    taggedAttachments.forEach(function (att, i) {
+      // Use attachment_id-based URL when available, fall back to filename-based URL
+      const dataUrl = att.attachment_id
+        ? "/api/messages/" + msg.message_id + "/attachments/" + att.attachment_id + "/data"
+        : "/api/messages/" + msg.message_id + "/attachments/by-filename/" + encodeURIComponent(att.filename) + "/data";
       const previewable = isPreviewable(att.mime_type);
 
       const item = document.createElement("div");
@@ -177,9 +185,8 @@ function render() {
 
       item.addEventListener("click", function () {
         if (previewable) {
-          openAttachmentPreview(att, dataUrl);
+          openAttachmentPreview(att, dataUrl, taggedAttachments, i);
         } else {
-          // Trigger download directly
           const a = document.createElement("a");
           a.href = dataUrl;
           a.download = att.filename || "attachment";
@@ -350,8 +357,20 @@ function attachmentIcon(mimeType) {
 
 /**
  * Opens a modal overlay to preview a browser-compatible attachment.
+ * Pass allAttachments (array) and currentIndex to enable prev/next navigation.
+ * Falls back to single-attachment mode when allAttachments is omitted.
  */
-function openAttachmentPreview(att, dataUrl) {
+function openAttachmentPreview(att, dataUrl, allAttachments, currentIndex) {
+  // Normalise — support single-attachment calls from older code paths
+  const list = allAttachments && allAttachments.length > 0 ? allAttachments : [att];
+  let idx = (currentIndex !== undefined && currentIndex >= 0) ? currentIndex : 0;
+
+  function attDataUrl(a) {
+    return a.attachment_id
+      ? "/api/messages/" + (a._messageId || att._messageId || "") + "/attachments/" + a.attachment_id + "/data"
+      : "/api/messages/" + (a._messageId || att._messageId || "") + "/attachments/by-filename/" + encodeURIComponent(a.filename) + "/data";
+  }
+
   // Remove any existing modal
   const existing = document.getElementById("attachment-preview-modal");
   if (existing) existing.remove();
@@ -360,7 +379,6 @@ function openAttachmentPreview(att, dataUrl) {
   overlay.id = "attachment-preview-modal";
   overlay.className = "attachment-preview-overlay";
 
-  // Close on backdrop click
   overlay.addEventListener("click", function (e) {
     if (e.target === overlay) overlay.remove();
   });
@@ -368,20 +386,17 @@ function openAttachmentPreview(att, dataUrl) {
   const modal = document.createElement("div");
   modal.className = "attachment-preview-modal";
 
-  // Header
+  // ── Header ──────────────────────────────────────────────────────────────
   const header = document.createElement("div");
   header.className = "attachment-preview-header";
 
   const title = document.createElement("span");
   title.className = "attachment-preview-title";
-  title.textContent = att.filename || "Preview";
 
   const actions = document.createElement("div");
   actions.className = "attachment-preview-actions";
 
   const downloadBtn = document.createElement("a");
-  downloadBtn.href = dataUrl;
-  downloadBtn.download = att.filename || "attachment";
   downloadBtn.className = "attachment-preview-download";
   downloadBtn.textContent = "⬇ Download";
 
@@ -396,46 +411,123 @@ function openAttachmentPreview(att, dataUrl) {
   header.appendChild(actions);
   modal.appendChild(header);
 
-  // Preview content
+  // ── Navigation bar ───────────────────────────────────────────────────────
+  const navBar = document.createElement("div");
+  navBar.className = "attachment-nav-bar";
+  navBar.style.display = list.length > 1 ? "" : "none";
+
+  const prevBtn = document.createElement("button");
+  prevBtn.className = "attachment-nav-btn";
+  prevBtn.textContent = "‹";
+  prevBtn.title = "Previous attachment";
+
+  const nextBtn = document.createElement("button");
+  nextBtn.className = "attachment-nav-btn";
+  nextBtn.textContent = "›";
+  nextBtn.title = "Next attachment";
+
+  const thumbStrip = document.createElement("div");
+  thumbStrip.className = "attachment-nav-strip";
+
+  list.forEach(function (a, i) {
+    const chip = document.createElement("button");
+    chip.className = "attachment-nav-chip";
+    chip.dataset.index = i;
+    chip.title = a.filename || "attachment";
+
+    const chipIcon = document.createElement("span");
+    chipIcon.textContent = attachmentIcon(a.mime_type);
+    chipIcon.className = "attachment-nav-chip-icon";
+
+    const chipName = document.createElement("span");
+    chipName.className = "attachment-nav-chip-name";
+    chipName.textContent = a.filename || "attachment";
+
+    chip.appendChild(chipIcon);
+    chip.appendChild(chipName);
+    chip.addEventListener("click", function () { navigateTo(i); });
+    thumbStrip.appendChild(chip);
+  });
+
+  navBar.appendChild(prevBtn);
+  navBar.appendChild(thumbStrip);
+  navBar.appendChild(nextBtn);
+  modal.appendChild(navBar);
+
+  // ── Preview body ─────────────────────────────────────────────────────────
   const body = document.createElement("div");
   body.className = "attachment-preview-body";
-
-  if (att.mime_type.startsWith("image/")) {
-    const img = document.createElement("img");
-    img.src = dataUrl;
-    img.alt = att.filename || "image";
-    img.className = "attachment-preview-image";
-    body.appendChild(img);
-  } else if (att.mime_type === "application/pdf") {
-    // Use <object> for PDF — more reliable than iframe in Chrome/Edge
-    const obj = document.createElement("object");
-    obj.data = dataUrl + "?preview=1";
-    obj.type = "application/pdf";
-    obj.className = "attachment-preview-frame";
-    // Fallback for browsers that can't render inline PDF
-    const fallback = document.createElement("div");
-    fallback.style.cssText = "padding:24px;text-align:center;color:#555;font-size:14px";
-    fallback.innerHTML = 'Your browser cannot preview PDFs inline. <a href="' + dataUrl + '" download="' + (att.filename || 'attachment') + '" style="color:#1a73e8">Download instead</a>.';
-    obj.appendChild(fallback);
-    body.appendChild(obj);
-  } else {
-    // text/plain, text/csv etc — iframe works fine
-    const frame = document.createElement("iframe");
-    frame.src = dataUrl + "?preview=1";
-    frame.className = "attachment-preview-frame";
-    frame.setAttribute("title", att.filename || "preview");
-    body.appendChild(frame);
-  }
-
   modal.appendChild(body);
+
   overlay.appendChild(modal);
   document.body.appendChild(overlay);
 
-  // Close on Escape
+  // ── Render a specific index ───────────────────────────────────────────────
+  function navigateTo(newIdx) {
+    idx = newIdx;
+    const current = list[idx];
+    const url = attDataUrl(current);
+
+    // Update header
+    title.textContent = current.filename || "Preview";
+    downloadBtn.href = url;
+    downloadBtn.download = current.filename || "attachment";
+
+    // Update nav button states
+    prevBtn.disabled = idx === 0;
+    nextBtn.disabled = idx === list.length - 1;
+
+    // Highlight active chip
+    thumbStrip.querySelectorAll(".attachment-nav-chip").forEach(function (chip) {
+      chip.classList.toggle("attachment-nav-chip--active", parseInt(chip.dataset.index) === idx);
+    });
+
+    // Scroll active chip into view
+    const activeChip = thumbStrip.querySelector(".attachment-nav-chip--active");
+    if (activeChip) activeChip.scrollIntoView({ block: "nearest", inline: "center", behavior: "smooth" });
+
+    // Render preview content
+    body.innerHTML = "";
+    if (current.mime_type.startsWith("image/")) {
+      const img = document.createElement("img");
+      img.src = url;
+      img.alt = current.filename || "image";
+      img.className = "attachment-preview-image";
+      body.appendChild(img);
+    } else if (current.mime_type === "application/pdf") {
+      const obj = document.createElement("object");
+      obj.data = url + "?preview=1";
+      obj.type = "application/pdf";
+      obj.className = "attachment-preview-frame";
+      const fallback = document.createElement("div");
+      fallback.style.cssText = "padding:24px;text-align:center;color:#555;font-size:14px";
+      fallback.innerHTML = 'Your browser cannot preview PDFs inline. <a href="' + url + '" download="' + (current.filename || "attachment") + '" style="color:#1a73e8">Download instead</a>.';
+      obj.appendChild(fallback);
+      body.appendChild(obj);
+    } else {
+      const frame = document.createElement("iframe");
+      frame.src = url + "?preview=1";
+      frame.className = "attachment-preview-frame";
+      frame.setAttribute("title", current.filename || "preview");
+      body.appendChild(frame);
+    }
+  }
+
+  prevBtn.addEventListener("click", function () { if (idx > 0) navigateTo(idx - 1); });
+  nextBtn.addEventListener("click", function () { if (idx < list.length - 1) navigateTo(idx + 1); });
+
+  // Initial render
+  navigateTo(idx);
+
+  // Keyboard navigation
   function onKeyDown(e) {
     if (e.key === "Escape") {
       overlay.remove();
       document.removeEventListener("keydown", onKeyDown);
+    } else if (e.key === "ArrowLeft" && idx > 0) {
+      navigateTo(idx - 1);
+    } else if (e.key === "ArrowRight" && idx < list.length - 1) {
+      navigateTo(idx + 1);
     }
   }
   document.addEventListener("keydown", onKeyDown);

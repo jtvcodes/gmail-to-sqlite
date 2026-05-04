@@ -138,6 +138,11 @@ Examples:
         metavar="N",
         help="Fetch and insert only N messages then stop (useful for testing)",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Log each individual message as it is saved (default: only warnings/errors)",
+    )
 
     return parser
 
@@ -181,6 +186,7 @@ def main() -> None:
                     num_workers=args.workers,
                     limit=args.test,
                     check_shutdown=check_shutdown,
+                    verbose=args.verbose,
                 )
             elif args.command == "sync-message":
                 sync.single_message(

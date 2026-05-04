@@ -204,6 +204,9 @@ class Message:
             # Extract received_date
             msg.received_date = msg._parse_received_date(parsed)
 
+            # Extract attachments from the RFC 2822 MIME parts
+            msg.attachments = msg._extract_attachments_from_mime(parsed)
+
             # Labels are passed in as a mapping; RFC 2822 source has no label IDs
             # so we leave msg.labels empty (caller can set them if needed)
             msg.labels = []
@@ -431,6 +434,66 @@ class Message:
 
         return None
 
+    def _extract_attachments_from_mime(self, parsed_email) -> List["Attachment"]:
+        """
+        Extract attachments from a parsed RFC 2822 email.message.Message object.
+
+        Walks all MIME parts and collects non-body parts that have a filename
+        or a Content-ID (inline images).  The binary data is NOT loaded here —
+        it will be fetched from the Gmail API by _save_attachments_to_disk
+        using the attachment_id.  We only need the metadata (filename,
+        mime_type, content_id) plus the attachment_id so the downloader knows
+        which Gmail API token to use.
+
+        Note: RFC 2822 parts do not carry a Gmail attachment_id — that comes
+        from the Gmail API JSON payload.  We set attachment_id to None here;
+        _save_attachments_to_disk will match by filename when the id is absent.
+        """
+        attachments: List[Attachment] = []
+        if not parsed_email.is_multipart():
+            return attachments
+
+        for part in parsed_email.walk():
+            mime_type = part.get_content_type()
+            # Skip body parts and multipart containers
+            if mime_type in ("text/plain", "text/html") or mime_type.startswith("multipart/"):
+                continue
+
+            # Filename from Content-Disposition or Content-Type name param
+            filename: Optional[str] = part.get_filename()
+            if not filename:
+                filename = part.get_param("name")
+            if filename:
+                filename = _decode_header(filename)
+
+            # Content-ID for inline images (cid: references)
+            content_id: Optional[str] = None
+            raw_cid = part.get("Content-ID", "")
+            if raw_cid:
+                content_id = raw_cid.strip("<>")
+
+            # Skip parts with neither a filename nor a content_id — nothing useful
+            if not filename and not content_id:
+                continue
+
+            size: int = 0
+            payload = part.get_payload(decode=True)
+            if payload:
+                size = len(payload)
+
+            attachments.append(
+                Attachment(
+                    filename=filename,
+                    mime_type=mime_type,
+                    size=size,
+                    data=None,          # fetched on demand from Gmail API
+                    attachment_id=None, # not available from RFC 2822; matched by filename
+                    content_id=content_id,
+                )
+            )
+
+        return attachments
+
     def _extract_attachments(self, payload: Dict) -> List[Attachment]:
         """
         Walk a multipart payload and extract attachment parts.
@@ -572,6 +635,76 @@ def _strip_to_html_tag(html: Optional[str]) -> Optional[str]:
     if idx != -1:
         return html[idx:]
     return html
+
+
+def extract_attachment_from_raw(raw: Optional[str], filename: str) -> Optional[bytes]:
+    """
+    Extract a named attachment's decoded bytes from a stored RFC 2822 string.
+
+    Walks all MIME parts looking for one whose filename (from Content-Disposition
+    or Content-Type name param) matches *filename*.  Returns the decoded payload
+    bytes, or None if not found or if decoding fails.
+
+    Args:
+        raw (Optional[str]): The decoded RFC 2822 email string stored in the DB.
+        filename (str): The attachment filename to look for.
+
+    Returns:
+        Optional[bytes]: The decoded attachment bytes, or None.
+    """
+    if not raw or not filename:
+        return None
+
+    try:
+        parsed = email.message_from_string(raw)
+        for part in parsed.walk():
+            mime_type = part.get_content_type()
+            if mime_type in ("text/plain", "text/html") or mime_type.startswith("multipart/"):
+                continue
+
+            part_filename = part.get_filename()
+            if not part_filename:
+                part_filename = part.get_param("name")
+            if part_filename:
+                part_filename = _decode_header(part_filename)
+
+            if part_filename == filename:
+                data = part.get_payload(decode=True)
+                return data if data else None
+    except Exception:
+        pass
+
+    return None
+
+
+def extract_attachment_by_content_id(raw: Optional[str], content_id: str) -> Optional[bytes]:
+    """
+    Extract an inline attachment's decoded bytes by Content-ID from a stored RFC 2822 string.
+
+    Args:
+        raw (Optional[str]): The decoded RFC 2822 email string stored in the DB.
+        content_id (str): The Content-ID value (with or without angle brackets).
+
+    Returns:
+        Optional[bytes]: The decoded attachment bytes, or None.
+    """
+    if not raw or not content_id:
+        return None
+
+    # Normalise — strip angle brackets if present
+    cid_bare = content_id.strip("<>")
+
+    try:
+        parsed = email.message_from_string(raw)
+        for part in parsed.walk():
+            raw_cid = part.get("Content-ID", "")
+            if raw_cid.strip("<>") == cid_bare:
+                data = part.get_payload(decode=True)
+                return data if data else None
+    except Exception:
+        pass
+
+    return None
 
 
 def extract_html_from_raw(raw: Optional[str]) -> Optional[str]:
