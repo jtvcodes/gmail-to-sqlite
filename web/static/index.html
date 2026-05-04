@@ -10,10 +10,35 @@
   <div id="loading-overlay">
     <div class="spinner"></div>
     <div id="loading-label" style="margin-top:12px;font-size:13px;color:#555"></div>
+    <pre id="sync-live-output"></pre>
   </div>
   <header>
     <h1>Gmail Web Viewer</h1>
-    <button id="sync-btn" onclick="runSync()" disabled>⟳ Sync</button>
+    <div class="sync-split-btn" id="sync-split-btn">
+      <button
+        id="sync-primary-btn"
+        class="sync-primary"
+        onclick="runSync('delta')"
+      >⟳ Sync New Data</button>
+      <button
+        id="sync-toggle-btn"
+        class="sync-toggle"
+        aria-haspopup="true"
+        aria-expanded="false"
+        aria-label="More sync options"
+        onclick="toggleSyncDropdown(event)"
+      >▾</button>
+      <ul
+        id="sync-dropdown"
+        class="sync-dropdown-menu"
+        role="menu"
+        hidden
+      >
+        <li role="menuitem" tabindex="-1" onclick="runSync('delta')">⟳ Sync New Data</li>
+        <li role="menuitem" tabindex="-1" onclick="runSync('force')">⟳ Sync All (Forced)</li>
+        <li role="menuitem" tabindex="-1" onclick="runSync('missing')">⟳ Sync Missing</li>
+      </ul>
+    </div>
   </header>
 
   <main>
@@ -24,6 +49,11 @@
     <div id="search-summary" hidden></div>
 
     <div id="message-list"></div>
+
+    <details id="sync-output-panel" hidden>
+      <summary>Last sync output</summary>
+      <pre id="sync-output-text"></pre>
+    </details>
 
     <div id="message-detail" hidden></div>
   </main>

@@ -1,11 +1,16 @@
 import json
+import logging
 import os
+import re
 import sqlite3
 import sys
 
 from flask import Blueprint, current_app, jsonify, make_response, request
 
 from web.db import get_db
+from gmail_to_sqlite.message import extract_html_from_raw
+
+logger = logging.getLogger(__name__)
 
 messages_bp = Blueprint("messages", __name__)
 
@@ -20,12 +25,13 @@ SUMMARY_FIELDS = (
     "labels",
     "subject",
     "timestamp",
+    "received_date",
     "is_read",
     "is_outgoing",
     "is_deleted",
 )
 
-DETAIL_FIELDS = SUMMARY_FIELDS + ("recipients", "body", "body_html")
+DETAIL_FIELDS = SUMMARY_FIELDS + ("recipients", "body", "raw")
 
 BOOL_FIELDS = {"is_read", "is_outgoing", "is_deleted"}
 
@@ -253,15 +259,20 @@ def get_message(message_id: str):
 
     msg_dict["attachments"] = attachments
 
-    # Resolve cid: inline image references in body_html to /api/cid/<content_id>
-    body_html = msg_dict.get("body_html") or ""
-    if body_html:
-        import re
-        msg_dict["body_html"] = re.sub(
-            r'cid:([^\s"\'>\)]+)',
-            lambda m: f'/api/cid/{m.group(1)}?msg={message_id}',
-            body_html
-        )
+    # Derive body_html on-the-fly from the stored raw RFC 2822 source
+    try:
+        raw_source = msg_dict.get("raw") or ""
+        body_html = extract_html_from_raw(raw_source)
+        if body_html:
+            body_html = re.sub(
+                r'cid:([^\s"\'>\)]+)',
+                lambda m: f'/api/cid/{m.group(1)}?msg={message_id}',
+                body_html
+            )
+        msg_dict["body_html"] = body_html
+    except Exception as exc:
+        logger.error(f"Failed to extract body_html from raw for message {message_id}: {exc}")
+        msg_dict["body_html"] = None
 
     return jsonify(msg_dict)
 

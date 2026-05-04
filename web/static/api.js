@@ -40,7 +40,9 @@ async function _apiFetch(url) {
     } catch (_err) {
       message = response.statusText;
     }
-    throw new Error(message);
+    const err = new Error(message);
+    err.status = response.status;
+    throw err;
   }
 
   return response.json();

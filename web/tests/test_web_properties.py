@@ -22,20 +22,34 @@ from web.server import create_app
 
 CREATE_TABLE_SQL = """
 CREATE TABLE messages (
-    message_id   TEXT PRIMARY KEY,
-    thread_id    TEXT,
-    sender       TEXT,
-    recipients   TEXT,
-    labels       TEXT,
-    subject      TEXT,
-    body         TEXT,
-    body_html    TEXT,
-    size         INTEGER,
-    timestamp    DATETIME,
-    is_read      INTEGER,
-    is_outgoing  INTEGER,
-    is_deleted   INTEGER,
-    last_indexed DATETIME
+    message_id    TEXT PRIMARY KEY,
+    thread_id     TEXT,
+    sender        TEXT,
+    recipients    TEXT,
+    labels        TEXT,
+    subject       TEXT,
+    body          TEXT,
+    raw           TEXT,
+    received_date DATETIME,
+    size          INTEGER,
+    timestamp     DATETIME,
+    is_read       INTEGER,
+    is_outgoing   INTEGER,
+    is_deleted    INTEGER,
+    last_indexed  DATETIME
+)
+"""
+
+CREATE_ATTACHMENTS_TABLE_SQL = """
+CREATE TABLE attachments (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id    TEXT NOT NULL REFERENCES messages(message_id),
+    filename      TEXT,
+    mime_type     TEXT NOT NULL,
+    size          INTEGER NOT NULL DEFAULT 0,
+    data          BLOB,
+    attachment_id TEXT,
+    content_id    TEXT
 )
 """
 
@@ -104,9 +118,10 @@ def _seed_db(path: str, messages: list) -> None:
     """Create the messages table and insert the given records."""
     conn = sqlite3.connect(path)
     conn.execute(CREATE_TABLE_SQL)
+    conn.execute(CREATE_ATTACHMENTS_TABLE_SQL)
     for i, msg in enumerate(messages):
         conn.execute(
-            "INSERT INTO messages VALUES (?,?,?,?,?,?,?,NULL,?,?,?,?,?,NULL)",
+            "INSERT INTO messages VALUES (?,?,?,?,?,?,?,NULL,NULL,?,?,?,?,?,NULL)",
             (
                 str(i),  # unique message_id by index
                 msg["thread_id"],
@@ -224,12 +239,20 @@ def test_property_3_search_filter_soundness(messages, query):
         data = resp.get_json()
 
         q_lower = query.lower()
+        # Build a lookup of body text from the DB (body is not in SUMMARY_FIELDS)
+        conn = sqlite3.connect(db_path)
+        body_lookup = {
+            row[0]: row[1]
+            for row in conn.execute("SELECT message_id, body FROM messages").fetchall()
+        }
+        conn.close()
+
         for msg in data["messages"]:
             subject = (msg.get("subject") or "").lower()
             sender = msg.get("sender") or {}
             sender_name = (sender.get("name") or "").lower()
             sender_email = (sender.get("email") or "").lower()
-            body = (msg.get("body") or "").lower()
+            body = (body_lookup.get(msg["message_id"]) or "").lower()
 
             matches = (
                 q_lower in subject
@@ -239,7 +262,7 @@ def test_property_3_search_filter_soundness(messages, query):
             )
             assert matches, (
                 f"Message {msg['message_id']} does not contain query {query!r}. "
-                f"subject={msg.get('subject')!r}, sender={msg.get('sender')!r}, body={msg.get('body')!r}"
+                f"subject={msg.get('subject')!r}, sender={msg.get('sender')!r}, body={body!r}"
             )
     finally:
         _cleanup(db_path)

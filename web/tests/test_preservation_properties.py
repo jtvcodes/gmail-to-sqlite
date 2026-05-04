@@ -29,20 +29,34 @@ from web.server import create_app
 
 CREATE_TABLE_SQL = """
 CREATE TABLE messages (
-    message_id   TEXT PRIMARY KEY,
-    thread_id    TEXT,
-    sender       TEXT,
-    recipients   TEXT,
-    labels       TEXT,
-    subject      TEXT,
-    body         TEXT,
-    body_html    TEXT,
-    size         INTEGER,
-    timestamp    DATETIME,
-    is_read      INTEGER,
-    is_outgoing  INTEGER,
-    is_deleted   INTEGER,
-    last_indexed DATETIME
+    message_id    TEXT PRIMARY KEY,
+    thread_id     TEXT,
+    sender        TEXT,
+    recipients    TEXT,
+    labels        TEXT,
+    subject       TEXT,
+    body          TEXT,
+    raw           TEXT,
+    received_date DATETIME,
+    size          INTEGER,
+    timestamp     DATETIME,
+    is_read       INTEGER,
+    is_outgoing   INTEGER,
+    is_deleted    INTEGER,
+    last_indexed  DATETIME
+)
+"""
+
+CREATE_ATTACHMENTS_TABLE_SQL = """
+CREATE TABLE attachments (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id    TEXT NOT NULL REFERENCES messages(message_id),
+    filename      TEXT,
+    mime_type     TEXT NOT NULL,
+    size          INTEGER NOT NULL DEFAULT 0,
+    data          BLOB,
+    attachment_id TEXT,
+    content_id    TEXT
 )
 """
 
@@ -118,9 +132,10 @@ def _seed_db_with_message(path: str, msg: dict) -> str:
     """Create the messages table and insert a single message. Returns message_id."""
     conn = sqlite3.connect(path)
     conn.execute(CREATE_TABLE_SQL)
+    conn.execute(CREATE_ATTACHMENTS_TABLE_SQL)
     message_id = "test_msg_1"
     conn.execute(
-        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,NULL,?,?,?,?,?,NULL)",
+        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,NULL,NULL,?,?,?,?,?,NULL)",
         (
             message_id,
             "thread1",
@@ -621,8 +636,9 @@ def _seed_preservation_db(path: str) -> None:
     """Create and seed the messages table for preservation tests."""
     conn = sqlite3.connect(path)
     conn.execute(CREATE_TABLE_SQL)
+    conn.execute(CREATE_ATTACHMENTS_TABLE_SQL)
     conn.executemany(
-        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,NULL,?,?,?,?,?,NULL)",
+        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,NULL,NULL,?,?,?,?,?,NULL)",
         PRESERVATION_SEED_ROWS,
     )
     conn.commit()
@@ -664,11 +680,22 @@ optional_bool_st = st.one_of(st.none(), st.sampled_from(["true", "false"]))
 # Unknown message_id: a UUID-like string guaranteed not to be in the seeded DB
 unknown_message_id_st = st.uuids().map(str)
 
+
+def _int_accepts(s: str) -> bool:
+    """Return True if Python's int() would successfully parse s."""
+    try:
+        int(s)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
 # Invalid page values: zero, negative, or non-numeric
+# Note: filter out strings that int() would accept (int() strips whitespace)
 invalid_page_st = st.one_of(
     st.integers(max_value=0),
     st.text(min_size=1, max_size=10).filter(
-        lambda s: not s.lstrip("-").isdigit()
+        lambda s: not s.lstrip("-").isdigit() and not _int_accepts(s)
     ),
 )
 
@@ -677,7 +704,7 @@ invalid_page_size_st = st.one_of(
     st.integers(max_value=0),
     st.integers(min_value=201),
     st.text(min_size=1, max_size=10).filter(
-        lambda s: not s.lstrip("-").isdigit()
+        lambda s: not s.lstrip("-").isdigit() and not _int_accepts(s)
     ),
 )
 

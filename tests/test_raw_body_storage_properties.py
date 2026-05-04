@@ -13,7 +13,7 @@ from hypothesis import given, settings, HealthCheck
 from hypothesis import strategies as st
 from playhouse.sqlite_ext import SqliteDatabase
 
-from gmail_to_sqlite.db import database_proxy, Message, SchemaVersion, Attachment as DbAttachment, create_message, create_attachments
+from gmail_to_sqlite.db import database_proxy, Message, Attachment as DbAttachment, create_message, create_attachments
 from gmail_to_sqlite.message import Message as GmailMessage, Attachment
 
 # ---------------------------------------------------------------------------
@@ -26,7 +26,7 @@ def fresh_db():
     """Context manager that provides a fresh in-memory SQLite database."""
     db = SqliteDatabase(":memory:")
     database_proxy.initialize(db)
-    db.create_tables([Message, SchemaVersion, DbAttachment])
+    db.create_tables([Message, DbAttachment])
     try:
         yield db
     finally:
@@ -70,7 +70,11 @@ def _make_html_payload(html_content: str) -> dict:
 
 
 def _make_stub_message(body_html, message_id=None):
-    """Return a minimal stub object compatible with create_message."""
+    """Return a minimal stub object compatible with create_message.
+
+    Note: body_html is kept as a parameter name for backward compatibility
+    but the value is stored in the raw field (body_html was replaced by raw).
+    """
 
     class _Stub:
         pass
@@ -83,7 +87,8 @@ def _make_stub_message(body_html, message_id=None):
     stub.labels = []
     stub.subject = "Test"
     stub.body = "plain text"
-    stub.body_html = body_html
+    stub.raw = body_html  # raw replaces body_html
+    stub.received_date = None
     stub.size = 100
     stub.timestamp = datetime(2024, 1, 1, 12, 0, 0)
     stub.is_read = False
@@ -110,6 +115,7 @@ def test_property_1_html_extraction_round_trip(html_content):
     """
     raw = _make_html_payload(html_content)
     msg = GmailMessage.from_raw(raw, labels={})
+    # body_html is still set by from_raw via _extract_html_body
     assert msg.body_html == html_content, (
         f"Expected body_html={html_content!r}, got {msg.body_html!r}"
     )
@@ -126,7 +132,7 @@ def test_property_1_html_extraction_round_trip(html_content):
 def test_property_2_storage_round_trip(body_html):
     """Feature: raw-body-storage, Property 2: Storage round-trip
 
-    For any body_html value (string or None), saving and retrieving a message
+    For any raw value (string or None), saving and retrieving a message
     returns the same value.
 
     **Validates: Requirements 2.2, 2.3, 5.2**
@@ -136,8 +142,8 @@ def test_property_2_storage_round_trip(body_html):
         create_message(stub)
 
         retrieved = Message.get(Message.message_id == stub.id)
-        assert retrieved.body_html == body_html, (
-            f"Expected body_html={body_html!r}, got {retrieved.body_html!r}"
+        assert retrieved.raw == body_html, (
+            f"Expected raw={body_html!r}, got {retrieved.raw!r}"
         )
 
 
@@ -153,9 +159,9 @@ def test_property_2_storage_round_trip(body_html):
 )
 @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 def test_property_3_upsert_updates_body_html(first_html, second_html):
-    """Feature: raw-body-storage, Property 3: Upsert updates body_html
+    """Feature: raw-body-storage, Property 3: Upsert updates raw
 
-    For any two body_html values, upserting with the second value results in
+    For any two raw values, upserting with the second value results in
     the database containing the second value.
 
     **Validates: Requirements 2.4**
@@ -172,8 +178,8 @@ def test_property_3_upsert_updates_body_html(first_html, second_html):
         create_message(stub2)
 
         retrieved = Message.get(Message.message_id == message_id)
-        assert retrieved.body_html == second_html, (
-            f"After upsert, expected body_html={second_html!r}, got {retrieved.body_html!r}"
+        assert retrieved.raw == second_html, (
+            f"After upsert, expected raw={second_html!r}, got {retrieved.raw!r}"
         )
 
 

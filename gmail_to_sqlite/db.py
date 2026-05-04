@@ -27,48 +27,8 @@ class DatabaseError(Exception):
     pass
 
 
-class SchemaVersion(Model):
-    """
-    Represents the database schema version.
-
-    Attributes:
-        version (IntegerField): The current schema version number.
-
-    Meta:
-        database (Database): The database connection to use.
-        db_table (str): The name of the database table for storing schema version.
-    """
-
-    version = IntegerField()
-
-    class Meta:
-        database = database_proxy
-        table_name = "schema_version"
-
-
 class Message(Model):
-    """
-    Represents an email message.
-
-    Attributes:
-        message_id (TextField): The unique identifier of the message.
-        thread_id (TextField): The unique identifier of the thread.
-        sender (JSONField): The sender of the message.
-        recipients (JSONField): The recipients of the message.
-        labels (JSONField): The labels of the message.
-        subject (TextField): The subject of the message.
-        body (TextField): The last messages sent or received without all other replies to the thread.
-        size (IntegerField): The size of the message.
-        timestamp (DateTimeField): The timestamp of the message.
-        is_read (BooleanField): Indicates whether the message has been read.
-        is_outgoing (BooleanField): Indicates whether the message was sent by the user.
-        is_deleted (BooleanField): Indicates whether the message has been deleted from Gmail.
-        last_indexed (DateTimeField): The timestamp when the message was last indexed.
-
-    Meta:
-        database (Database): The database connection to use.
-        db_table (str): The name of the database table for storing messages.
-    """
+    """Represents an email message."""
 
     message_id = TextField(unique=True)
     thread_id = TextField()
@@ -77,9 +37,10 @@ class Message(Model):
     labels = JSONField()
     subject = TextField(null=True)
     body = TextField(null=True)
-    body_html = TextField(null=True)
+    raw = TextField(null=True)
+    received_date = DateTimeField(null=True)
     size = IntegerField()
-    timestamp = DateTimeField()
+    timestamp = DateTimeField(null=True)
     is_read = BooleanField()
     is_outgoing = BooleanField()
     is_deleted = BooleanField(default=False)
@@ -91,22 +52,7 @@ class Message(Model):
 
 
 class Attachment(Model):
-    """
-    Represents an email attachment linked to a message.
-
-    Attributes:
-        id (AutoField): Auto-incrementing primary key.
-        message_id (ForeignKeyField): FK to messages.message_id.
-        filename (TextField): Attachment filename (nullable).
-        mime_type (TextField): MIME type of the attachment.
-        size (IntegerField): Size in bytes (default 0).
-        data (BlobField): Raw attachment bytes (nullable for large attachments).
-        attachment_id (TextField): Gmail attachment ID for large-attachment fetch (nullable).
-
-    Meta:
-        database (Database): The database connection to use.
-        table_name (str): The name of the database table.
-    """
+    """Represents an email attachment linked to a message."""
 
     id = AutoField()
     message_id = ForeignKeyField(
@@ -131,6 +77,8 @@ def init(data_dir: str, enable_logging: bool = False) -> SqliteDatabase:
     """
     Initialize the database for the given data_dir.
 
+    Creates the messages and attachments tables if they don't already exist.
+
     Args:
         data_dir (str): The path where to store the data.
         enable_logging (bool, optional): Whether to enable logging. Defaults to False.
@@ -145,17 +93,12 @@ def init(data_dir: str, enable_logging: bool = False) -> SqliteDatabase:
         db_path = f"{data_dir}/{DATABASE_FILE_NAME}"
         db = SqliteDatabase(db_path)
         database_proxy.initialize(db)
-        db.create_tables([Message, SchemaVersion, Attachment])
+        db.create_tables([Message, Attachment], safe=True)
 
         if enable_logging:
             logger = logging.getLogger("peewee")
             logger.setLevel(logging.DEBUG)
             logger.addHandler(logging.StreamHandler())
-
-        from .migrations import run_migrations
-
-        if not run_migrations():
-            raise DatabaseError("Failed to run database migrations")
 
         return db
     except Exception as e:
@@ -220,7 +163,8 @@ def create_message(msg: Any) -> None:
             labels=msg.labels,
             subject=msg.subject,
             body=msg.body,
-            body_html=msg.body_html,
+            raw=msg.raw,
+            received_date=msg.received_date,
             size=msg.size,
             timestamp=msg.timestamp,
             is_read=msg.is_read,
@@ -234,7 +178,8 @@ def create_message(msg: Any) -> None:
                 Message.last_indexed: last_indexed,
                 Message.labels: msg.labels,
                 Message.is_deleted: False,
-                Message.body_html: msg.body_html,
+                Message.raw: msg.raw,
+                Message.received_date: msg.received_date,
             },
         ).execute()
         create_attachments(msg.id, getattr(msg, "attachments", []))
@@ -316,23 +261,23 @@ def get_all_message_ids() -> List[str]:
         raise DatabaseError(f"Failed to retrieve message IDs: {e}")
 
 
-def get_message_ids_missing_html() -> List[str]:
+def get_message_ids_missing_raw() -> List[str]:
     """
-    Returns message IDs where body_html is NULL (candidates for re-sync
-    to fix the shallow HTML extraction bug for multipart/mixed messages).
+    Returns message IDs where the raw column is NULL (candidates for re-sync
+    to fetch the complete RFC 2822 source).
 
     Returns:
-        List[str]: List of message IDs with NULL body_html.
+        List[str]: List of message IDs with NULL raw.
     """
     try:
         return [
             message.message_id
             for message in Message.select(Message.message_id).where(
-                Message.body_html.is_null(True)
+                Message.raw.is_null(True)
             )
         ]
     except Exception as e:
-        raise DatabaseError(f"Failed to retrieve message IDs missing html: {e}")
+        raise DatabaseError(f"Failed to retrieve message IDs missing raw: {e}")
 
 
 def get_deleted_message_ids() -> List[str]:

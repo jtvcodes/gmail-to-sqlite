@@ -1,5 +1,8 @@
 import base64
+import email
+import email.header
 import email.message
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from email.utils import parseaddr, parsedate_to_datetime
@@ -8,6 +11,29 @@ from typing import Dict, List, Optional
 from bs4 import BeautifulSoup
 
 from .constants import SUPPORTED_MIME_TYPES
+
+logger = logging.getLogger(__name__)
+
+
+def _decode_header(value: Optional[str]) -> Optional[str]:
+    """
+    Decode an RFC 2047 encoded header value (e.g. =?UTF-8?Q?...?=) to a
+    plain Unicode string. Returns the value unchanged if it is already plain
+    text or if decoding fails.
+    """
+    if not value:
+        return value
+    try:
+        parts = email.header.decode_header(value)
+        decoded_parts = []
+        for part, charset in parts:
+            if isinstance(part, bytes):
+                decoded_parts.append(part.decode(charset or "utf-8", errors="replace"))
+            else:
+                decoded_parts.append(part)
+        return "".join(decoded_parts)
+    except Exception:
+        return value
 
 
 @dataclass
@@ -55,6 +81,8 @@ class Message:
         self.subject: Optional[str] = None
         self.body: Optional[str] = None
         self.body_html: Optional[str] = None
+        self.raw: Optional[str] = None
+        self.received_date: Optional[datetime] = None
         self.size: int = 0
         self.timestamp: Optional[datetime] = None
         self.is_read: bool = False
@@ -83,6 +111,148 @@ class Message:
         except Exception as e:
             raise MessageParsingError(f"Failed to parse message: {e}")
 
+    @classmethod
+    def from_raw_source(cls, raw_str: str, labels: Dict[str, str]) -> "Message":
+        """
+        Create a Message object from a decoded RFC 2822 email string.
+
+        Args:
+            raw_str (str): The decoded RFC 2822 email string.
+            labels (Dict[str, str]): Mapping of label IDs to label names.
+
+        Returns:
+            Message: The parsed Message object.
+
+        Raises:
+            MessageParsingError: If message parsing fails.
+        """
+        try:
+            parsed = email.message_from_string(raw_str)
+            msg = cls()
+
+            # Extract standard headers
+            from_header = _decode_header(parsed.get("From", ""))
+            addr = parseaddr(from_header)
+            msg.sender = {"name": _decode_header(addr[0]) or "", "email": addr[1]}
+
+            to_header = parsed.get("To", "")
+            if to_header:
+                msg.recipients["to"] = msg.parse_addresses(to_header)
+
+            cc_header = parsed.get("Cc", "")
+            if cc_header:
+                msg.recipients["cc"] = msg.parse_addresses(cc_header)
+
+            bcc_header = parsed.get("Bcc", "")
+            if bcc_header:
+                msg.recipients["bcc"] = msg.parse_addresses(bcc_header)
+
+            msg.subject = _decode_header(parsed.get("Subject"))
+
+            date_header = parsed.get("Date", "")
+            if date_header:
+                try:
+                    msg.timestamp = parsedate_to_datetime(date_header)
+                except Exception:
+                    msg.timestamp = None
+
+            # Extract plain-text body by walking MIME parts
+            plain_body: Optional[str] = None
+            html_body: Optional[str] = None
+
+            if parsed.is_multipart():
+                for part in parsed.walk():
+                    content_type = part.get_content_type()
+                    if content_type == "text/plain" and plain_body is None:
+                        try:
+                            payload = part.get_payload(decode=True)
+                            if payload is not None:
+                                charset = part.get_content_charset() or "utf-8"
+                                plain_body = payload.decode(charset, errors="replace")
+                        except Exception:
+                            pass
+                    elif content_type == "text/html" and html_body is None:
+                        try:
+                            payload = part.get_payload(decode=True)
+                            if payload is not None:
+                                charset = part.get_content_charset() or "utf-8"
+                                html_body = payload.decode(charset, errors="replace")
+                        except Exception:
+                            pass
+            else:
+                content_type = parsed.get_content_type()
+                try:
+                    payload = parsed.get_payload(decode=True)
+                    if payload is not None:
+                        charset = parsed.get_content_charset() or "utf-8"
+                        decoded = payload.decode(charset, errors="replace")
+                        if content_type == "text/plain":
+                            plain_body = decoded
+                        elif content_type == "text/html":
+                            html_body = decoded
+                except Exception:
+                    pass
+
+            if plain_body is not None:
+                msg.body = plain_body
+            elif html_body is not None:
+                msg.body = msg.html2text(html_body)
+
+            # Store the full raw RFC 2822 string
+            msg.raw = raw_str
+
+            # Extract received_date
+            msg.received_date = msg._parse_received_date(parsed)
+
+            # Labels are passed in as a mapping; RFC 2822 source has no label IDs
+            # so we leave msg.labels empty (caller can set them if needed)
+            msg.labels = []
+            msg.is_read = False
+            msg.is_outgoing = False
+            msg.size = len(raw_str.encode("utf-8"))
+
+            return msg
+        except MessageParsingError:
+            raise
+        except Exception as e:
+            raise MessageParsingError(f"Failed to parse raw RFC 2822 message: {e}")
+
+    def _parse_received_date(self, parsed_email) -> Optional[datetime]:
+        """
+        Extract received_date from the last Received: header, falling back
+        to the last X-Received: header.
+
+        Received headers are prepended by each hop, so the last one in the
+        list is the final delivery server (closest to the recipient's mailbox).
+
+        Header format example:
+          Received: by 2002:a05:6214:2582:b0:88a:3657:d3e2 with SMTP id
+                    fq2csp778250qvb; Sat, 31 Jan 2026 05:37:01 -0800 (PST)
+
+        The date is the substring after the final semicolon (;).
+
+        Args:
+            parsed_email: A parsed email.message.Message object.
+
+        Returns:
+            Optional[datetime]: The parsed received date, or None.
+        """
+        for header_name in ("received", "x-received"):
+            values = parsed_email.get_all(header_name) or []
+            # get_all() returns in header order (top to bottom);
+            # last element = last Received: = final delivery hop
+            for value in reversed(values):
+                if ";" in value:
+                    date_str = value.rsplit(";", 1)[-1].strip()
+                    try:
+                        return parsedate_to_datetime(date_str)
+                    except Exception:
+                        logger.debug(
+                            f"Could not parse date from {header_name}: {date_str!r}"
+                        )
+                        continue
+        return None
+
     def parse_addresses(self, addresses: str) -> List[Dict[str, str]]:
         """
         Parse a comma-separated list of email addresses.
@@ -98,10 +268,10 @@ class Message:
             return parsed_addresses
 
         for address in addresses.split(","):
-            name, email = parseaddr(address.strip())
-            if email:
+            name, email_addr = parseaddr(address.strip())
+            if email_addr:
                 parsed_addresses.append(
-                    {"email": email.lower(), "name": name.strip() if name else ""}
+                    {"email": email_addr.lower(), "name": _decode_header(name).strip() if name else ""}
                 )
 
         return parsed_addresses
@@ -378,3 +548,68 @@ class Message:
 
         # Extract attachments from the payload (task 10.7)
         self.attachments = self._extract_attachments(payload)
+
+
+# ---------------------------------------------------------------------------
+# Module-level helper functions
+# ---------------------------------------------------------------------------
+
+
+def _strip_to_html_tag(html: Optional[str]) -> Optional[str]:
+    """
+    If html contains '<html', return the substring from '<html' onward.
+    Otherwise return html unchanged. Returns None for None/empty input.
+
+    Args:
+        html (Optional[str]): The HTML string to process.
+
+    Returns:
+        Optional[str]: The stripped HTML string, or None.
+    """
+    if not html:
+        return None
+    idx = html.find("<html")
+    if idx != -1:
+        return html[idx:]
+    return html
+
+
+def extract_html_from_raw(raw: Optional[str]) -> Optional[str]:
+    """
+    Extract the text/html MIME part from a decoded RFC 2822 string.
+
+    Returns None if raw is None/empty or no text/html part exists.
+    Applies _strip_to_html_tag to the extracted HTML before returning.
+
+    Args:
+        raw (Optional[str]): The decoded RFC 2822 email string.
+
+    Returns:
+        Optional[str]: The extracted HTML string, or None.
+    """
+    if not raw:
+        return None
+
+    try:
+        parsed = email.message_from_string(raw)
+
+        if parsed.is_multipart():
+            for part in parsed.walk():
+                if part.get_content_type() == "text/html":
+                    payload = part.get_payload(decode=True)
+                    if payload is not None:
+                        charset = part.get_content_charset() or "utf-8"
+                        html = payload.decode(charset, errors="replace")
+                        return _strip_to_html_tag(html)
+        else:
+            if parsed.get_content_type() == "text/html":
+                payload = parsed.get_payload(decode=True)
+                if payload is not None:
+                    charset = parsed.get_content_charset() or "utf-8"
+                    html = payload.decode(charset, errors="replace")
+                    return _strip_to_html_tag(html)
+
+    except Exception:
+        pass
+
+    return None

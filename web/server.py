@@ -4,7 +4,7 @@ import sys
 
 from flask import Flask, send_from_directory
 
-from web.db import close_db
+from web.db import close_db, ensure_indexes
 from web.api.messages import messages_bp
 from web.api.labels import labels_bp
 from web.api.sync import sync_bp
@@ -27,6 +27,9 @@ def create_app(db_path: str) -> Flask:
     # 2.4 — store DB path in config and register teardown
     app.config["DB_PATH"] = db_path
     app.teardown_appcontext(close_db)
+
+    # Create performance indexes on startup (safe no-op if they already exist)
+    ensure_indexes(db_path)
 
     # 2.5 — register blueprints under /api
     app.register_blueprint(messages_bp, url_prefix="/api")
@@ -61,14 +64,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # 2.3 — validate DB file exists at startup
+    # If the DB file doesn't exist yet, start anyway — the frontend will
+    # prompt the user to run a sync, which creates the file.
     if not os.path.isfile(args.db_path):
         print(
-            f"Error: database file not found: {args.db_path!r}\n"
-            "Please run the sync command first or supply a valid --db-path.",
+            f"Note: database file not found at {args.db_path!r}. "
+            "Starting server anyway — open the app to run an initial sync.",
             file=sys.stderr,
         )
-        sys.exit(1)
 
     app = create_app(db_path=args.db_path)
 

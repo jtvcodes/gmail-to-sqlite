@@ -28,20 +28,34 @@ from web.server import create_app
 
 CREATE_TABLE_SQL = """
 CREATE TABLE messages (
-    message_id   TEXT PRIMARY KEY,
-    thread_id    TEXT,
-    sender       TEXT,
-    recipients   TEXT,
-    labels       TEXT,
-    subject      TEXT,
-    body         TEXT,
-    body_html    TEXT,
-    size         INTEGER,
-    timestamp    DATETIME,
-    is_read      INTEGER,
-    is_outgoing  INTEGER,
-    is_deleted   INTEGER,
-    last_indexed DATETIME
+    message_id    TEXT PRIMARY KEY,
+    thread_id     TEXT,
+    sender        TEXT,
+    recipients    TEXT,
+    labels        TEXT,
+    subject       TEXT,
+    body          TEXT,
+    raw           TEXT,
+    received_date DATETIME,
+    size          INTEGER,
+    timestamp     DATETIME,
+    is_read       INTEGER,
+    is_outgoing   INTEGER,
+    is_deleted    INTEGER,
+    last_indexed  DATETIME
+)
+"""
+
+CREATE_ATTACHMENTS_TABLE_SQL = """
+CREATE TABLE attachments (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id    TEXT NOT NULL REFERENCES messages(message_id),
+    filename      TEXT,
+    mime_type     TEXT NOT NULL,
+    size          INTEGER NOT NULL DEFAULT 0,
+    data          BLOB,
+    attachment_id TEXT,
+    content_id    TEXT
 )
 """
 
@@ -105,9 +119,10 @@ def _seed_db_with_message(path: str, recipients: dict) -> str:
     """
     conn = sqlite3.connect(path)
     conn.execute(CREATE_TABLE_SQL)
+    conn.execute(CREATE_ATTACHMENTS_TABLE_SQL)
     message_id = "test_msg_1"
     conn.execute(
-        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,NULL,?,?,?,?,?,NULL)",
+        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,NULL,NULL,?,?,?,?,?,NULL)",
         (
             message_id,
             "thread1",

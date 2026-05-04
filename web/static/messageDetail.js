@@ -88,7 +88,11 @@ function render() {
   }
 
   const dateLine = document.createElement("div");
-  dateLine.textContent = "Date: " + (msg.timestamp ? new Date(msg.timestamp).toLocaleString() : "");
+  if (msg.received_date != null) {
+    dateLine.textContent = "Received: " + new Date(msg.received_date).toLocaleString();
+  } else {
+    dateLine.textContent = "Date: " + (msg.timestamp ? new Date(msg.timestamp).toLocaleString() : "");
+  }
   meta.appendChild(dateLine);
 
   const idLine = document.createElement("div");
@@ -107,6 +111,21 @@ function render() {
   gmailLink.className = "detail-gmail-link";
   gmailLine.appendChild(gmailLink);
   meta.appendChild(gmailLine);
+
+  // View source link
+  if (msg.raw != null && msg.raw !== "") {
+    const viewSourceLine = document.createElement("div");
+    const viewSourceLink = document.createElement("a");
+    viewSourceLink.textContent = "View source";
+    viewSourceLink.href = "#";
+    viewSourceLink.className = "detail-view-source-link";
+    viewSourceLink.addEventListener("click", function (event) {
+      event.preventDefault();
+      openSourceModal(msg.raw);
+    });
+    viewSourceLine.appendChild(viewSourceLink);
+    meta.appendChild(viewSourceLine);
+  }
 
   panel.appendChild(meta);
 
@@ -425,4 +444,69 @@ function openAttachmentPreview(att, dataUrl) {
   });
 }
 
-const messageDetail = { render, renderBody, buildToggleButton };
+/**
+ * Opens a modal overlay to display the raw RFC 2822 source of a message.
+ *
+ * Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7
+ */
+function openSourceModal(rawSource) {
+  // Remove any existing modal
+  const existing = document.getElementById("source-modal-overlay");
+  if (existing) existing.remove();
+
+  const overlay = document.createElement("div");
+  overlay.id = "source-modal-overlay";
+  overlay.className = "source-modal-overlay";
+
+  // Close on backdrop click
+  overlay.addEventListener("click", function (e) {
+    if (e.target === overlay) overlay.remove();
+  });
+
+  const modal = document.createElement("div");
+  modal.className = "source-modal";
+
+  // Header
+  const header = document.createElement("div");
+  header.className = "source-modal-header";
+
+  const title = document.createElement("span");
+  title.className = "source-modal-title";
+  title.textContent = "Message Source";
+
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "source-modal-close";
+  closeBtn.textContent = "✕";
+  closeBtn.addEventListener("click", function () { overlay.remove(); });
+
+  header.appendChild(title);
+  header.appendChild(closeBtn);
+  modal.appendChild(header);
+
+  // Body
+  const body = document.createElement("div");
+  body.className = "source-modal-body";
+
+  const pre = document.createElement("pre");
+  pre.className = "source-modal-pre";
+  pre.textContent = rawSource;
+  body.appendChild(pre);
+
+  modal.appendChild(body);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  // Close on Escape
+  function onKeyDown(e) {
+    if (e.key === "Escape") {
+      overlay.remove();
+      document.removeEventListener("keydown", onKeyDown);
+    }
+  }
+  document.addEventListener("keydown", onKeyDown);
+  overlay.addEventListener("remove", function () {
+    document.removeEventListener("keydown", onKeyDown);
+  });
+}
+
+const messageDetail = { render, renderBody, buildToggleButton, openSourceModal };

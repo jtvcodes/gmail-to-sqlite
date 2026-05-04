@@ -451,3 +451,243 @@ class TestAttachmentParsing:
         att = message.attachments[0]
         assert att.data is None
         assert att.attachment_id == "large_att_xyz789"
+
+
+# ===========================================================================
+# Task 2.7 — Unit tests for message parser (from_raw_source, extract_html_from_raw,
+#             _strip_to_html_tag, _parse_received_date, received_date)
+# ===========================================================================
+
+import email as _email
+import textwrap
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.utils import format_datetime
+from datetime import timezone, datetime as _datetime
+
+from gmail_to_sqlite.message import extract_html_from_raw, _strip_to_html_tag
+
+
+def _build_multipart_rfc2822(
+    plain_text: str = "Hello plain",
+    html_text: str = "<html><body>Hello HTML</body></html>",
+    from_addr: str = "sender@example.com",
+    to_addr: str = "recipient@example.com",
+    subject: str = "Test Subject",
+    date_str: str = "Mon, 01 Jan 2024 12:00:00 +0000",
+    received_headers: list = None,
+) -> str:
+    """Build a minimal multipart/alternative RFC 2822 message string."""
+    msg = MIMEMultipart("alternative")
+    msg["From"] = from_addr
+    msg["To"] = to_addr
+    msg["Subject"] = subject
+    msg["Date"] = date_str
+    if received_headers:
+        for rh in received_headers:
+            msg["Received"] = rh
+    msg.attach(MIMEText(plain_text, "plain", "utf-8"))
+    msg.attach(MIMEText(html_text, "html", "utf-8"))
+    return msg.as_string()
+
+
+def _build_plain_only_rfc2822(
+    plain_text: str = "Hello plain",
+    from_addr: str = "sender@example.com",
+    to_addr: str = "recipient@example.com",
+    subject: str = "Test Subject",
+    date_str: str = "Mon, 01 Jan 2024 12:00:00 +0000",
+) -> str:
+    """Build a plain-text-only RFC 2822 message string."""
+    msg = MIMEText(plain_text, "plain", "utf-8")
+    msg["From"] = from_addr
+    msg["To"] = to_addr
+    msg["Subject"] = subject
+    msg["Date"] = date_str
+    return msg.as_string()
+
+
+class TestExtractHtmlFromRaw:
+    """Tests for the extract_html_from_raw module-level function."""
+
+    def test_extract_html_from_multipart_message(self):
+        """extract_html_from_raw returns the HTML part from a multipart message."""
+        html_content = "<html><body><p>Hello World</p></body></html>"
+        raw = _build_multipart_rfc2822(html_text=html_content)
+        result = extract_html_from_raw(raw)
+        assert result is not None
+        assert "Hello World" in result
+
+    def test_returns_none_for_plain_text_only(self):
+        """extract_html_from_raw returns None when there is no text/html part."""
+        raw = _build_plain_only_rfc2822()
+        result = extract_html_from_raw(raw)
+        assert result is None
+
+    def test_returns_none_for_none_input(self):
+        """extract_html_from_raw returns None for None input."""
+        result = extract_html_from_raw(None)
+        assert result is None
+
+    def test_returns_none_for_empty_string(self):
+        """extract_html_from_raw returns None for empty string input."""
+        result = extract_html_from_raw("")
+        assert result is None
+
+    def test_strips_preamble_before_html_tag(self):
+        """extract_html_from_raw strips content before <html tag."""
+        html_content = "preamble text\n<html><body>Content</body></html>"
+        raw = _build_multipart_rfc2822(html_text=html_content)
+        result = extract_html_from_raw(raw)
+        assert result is not None
+        assert result.startswith("<html")
+
+    def test_single_part_html_message(self):
+        """extract_html_from_raw works on a single-part text/html message."""
+        html_content = "<html><body>Single part HTML</body></html>"
+        msg = MIMEText(html_content, "html", "utf-8")
+        msg["From"] = "sender@example.com"
+        msg["To"] = "recipient@example.com"
+        msg["Subject"] = "HTML only"
+        msg["Date"] = "Mon, 01 Jan 2024 12:00:00 +0000"
+        raw = msg.as_string()
+        result = extract_html_from_raw(raw)
+        assert result is not None
+        assert "Single part HTML" in result
+
+
+class TestStripToHtmlTag:
+    """Tests for the _strip_to_html_tag module-level helper."""
+
+    def test_strips_preamble_before_html_tag(self):
+        """_strip_to_html_tag strips everything before <html."""
+        html = "Some preamble text\n<html><body>Content</body></html>"
+        result = _strip_to_html_tag(html)
+        assert result is not None
+        assert result.startswith("<html")
+        assert "preamble" not in result
+
+    def test_returns_unchanged_when_no_html_tag(self):
+        """_strip_to_html_tag returns the string unchanged when no <html tag."""
+        html = "<div>No html tag here</div>"
+        result = _strip_to_html_tag(html)
+        assert result == html
+
+    def test_returns_none_for_none_input(self):
+        """_strip_to_html_tag returns None for None input."""
+        result = _strip_to_html_tag(None)
+        assert result is None
+
+    def test_returns_none_for_empty_string(self):
+        """_strip_to_html_tag returns None for empty string."""
+        result = _strip_to_html_tag("")
+        assert result is None
+
+    def test_preserves_html_when_no_preamble(self):
+        """_strip_to_html_tag returns the full string when it starts with <html."""
+        html = "<html><body>Content</body></html>"
+        result = _strip_to_html_tag(html)
+        assert result == html
+
+
+class TestFromRawSource:
+    """Tests for Message.from_raw_source classmethod."""
+
+    def test_extracts_correct_headers(self):
+        """from_raw_source extracts From, To, Subject, Date headers correctly."""
+        raw = _build_multipart_rfc2822(
+            from_addr="Alice <alice@example.com>",
+            to_addr="bob@example.com",
+            subject="Hello Bob",
+            date_str="Mon, 01 Jan 2024 12:00:00 +0000",
+        )
+        msg = Message.from_raw_source(raw, {})
+        assert msg.sender["email"] == "alice@example.com"
+        assert msg.sender["name"] == "Alice"
+        assert any(r["email"] == "bob@example.com" for r in msg.recipients.get("to", []))
+        assert msg.subject == "Hello Bob"
+
+    def test_raw_attribute_equals_input(self):
+        """from_raw_source sets msg.raw equal to the input string."""
+        raw = _build_multipart_rfc2822()
+        msg = Message.from_raw_source(raw, {})
+        assert msg.raw == raw
+
+    def test_extracts_plain_text_body(self):
+        """from_raw_source extracts the plain-text body."""
+        raw = _build_multipart_rfc2822(plain_text="This is the plain body.")
+        msg = Message.from_raw_source(raw, {})
+        assert msg.body is not None
+        assert "This is the plain body." in msg.body
+
+    def test_fallback_to_html2text_when_no_plain(self):
+        """from_raw_source falls back to html2text when no text/plain part."""
+        html_content = "<html><body><p>HTML only body</p></body></html>"
+        msg_obj = MIMEText(html_content, "html", "utf-8")
+        msg_obj["From"] = "sender@example.com"
+        msg_obj["To"] = "recipient@example.com"
+        msg_obj["Subject"] = "HTML only"
+        msg_obj["Date"] = "Mon, 01 Jan 2024 12:00:00 +0000"
+        raw = msg_obj.as_string()
+        msg = Message.from_raw_source(raw, {})
+        assert msg.body is not None
+        assert "HTML only body" in msg.body
+
+    def test_received_date_from_last_received_header(self):
+        """from_raw_source extracts received_date from the last Received: header."""
+        received_headers = [
+            "by server1.example.com; Mon, 01 Jan 2024 10:00:00 +0000",
+            "by server2.example.com; Mon, 01 Jan 2024 12:00:00 +0000",
+        ]
+        raw = _build_multipart_rfc2822(received_headers=received_headers)
+        msg = Message.from_raw_source(raw, {})
+        assert msg.received_date is not None
+        # Should use the last header (12:00:00)
+        assert msg.received_date.hour == 12
+
+    def test_received_date_fallback_to_x_received(self):
+        """from_raw_source falls back to X-Received: when no Received: header."""
+        msg_obj = MIMEMultipart("alternative")
+        msg_obj["From"] = "sender@example.com"
+        msg_obj["To"] = "recipient@example.com"
+        msg_obj["Subject"] = "Test"
+        msg_obj["Date"] = "Mon, 01 Jan 2024 12:00:00 +0000"
+        msg_obj["X-Received"] = "by xserver.example.com; Mon, 01 Jan 2024 11:30:00 +0000"
+        msg_obj.attach(MIMEText("plain", "plain", "utf-8"))
+        raw = msg_obj.as_string()
+        msg = Message.from_raw_source(raw, {})
+        assert msg.received_date is not None
+        assert msg.received_date.hour == 11
+        assert msg.received_date.minute == 30
+
+    def test_received_date_none_when_no_headers(self):
+        """from_raw_source sets received_date to None when no Received/X-Received headers."""
+        raw = _build_multipart_rfc2822()
+        msg = Message.from_raw_source(raw, {})
+        assert msg.received_date is None
+
+    def test_received_date_none_when_no_semicolon(self):
+        """from_raw_source sets received_date to None when Received header has no semicolon."""
+        msg_obj = MIMEMultipart("alternative")
+        msg_obj["From"] = "sender@example.com"
+        msg_obj["To"] = "recipient@example.com"
+        msg_obj["Subject"] = "Test"
+        msg_obj["Date"] = "Mon, 01 Jan 2024 12:00:00 +0000"
+        msg_obj["Received"] = "by server.example.com with SMTP id abc123"
+        msg_obj.attach(MIMEText("plain", "plain", "utf-8"))
+        raw = msg_obj.as_string()
+        msg = Message.from_raw_source(raw, {})
+        assert msg.received_date is None
+
+    def test_received_date_none_when_date_malformed(self):
+        """from_raw_source sets received_date to None when date substring is malformed."""
+        msg_obj = MIMEMultipart("alternative")
+        msg_obj["From"] = "sender@example.com"
+        msg_obj["To"] = "recipient@example.com"
+        msg_obj["Subject"] = "Test"
+        msg_obj["Date"] = "Mon, 01 Jan 2024 12:00:00 +0000"
+        msg_obj["Received"] = "by server.example.com; NOT A VALID DATE"
+        msg_obj.attach(MIMEText("plain", "plain", "utf-8"))
+        raw = msg_obj.as_string()
+        msg = Message.from_raw_source(raw, {})
+        assert msg.received_date is None

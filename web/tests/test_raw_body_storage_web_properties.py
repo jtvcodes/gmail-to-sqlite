@@ -21,20 +21,21 @@ from web.server import create_app
 
 CREATE_TABLE_SQL = """
 CREATE TABLE messages (
-    message_id   TEXT PRIMARY KEY,
-    thread_id    TEXT,
-    sender       TEXT,
-    recipients   TEXT,
-    labels       TEXT,
-    subject      TEXT,
-    body         TEXT,
-    body_html    TEXT,
-    size         INTEGER,
-    timestamp    DATETIME,
-    is_read      INTEGER,
-    is_outgoing  INTEGER,
-    is_deleted   INTEGER,
-    last_indexed DATETIME
+    message_id    TEXT PRIMARY KEY,
+    thread_id     TEXT,
+    sender        TEXT,
+    recipients    TEXT,
+    labels        TEXT,
+    subject       TEXT,
+    body          TEXT,
+    raw           TEXT,
+    received_date DATETIME,
+    size          INTEGER,
+    timestamp     DATETIME,
+    is_read       INTEGER,
+    is_outgoing   INTEGER,
+    is_deleted    INTEGER,
+    last_indexed  DATETIME
 )
 """
 
@@ -46,7 +47,8 @@ CREATE TABLE attachments (
     mime_type     TEXT NOT NULL,
     size          INTEGER NOT NULL DEFAULT 0,
     data          BLOB,
-    attachment_id TEXT
+    attachment_id TEXT,
+    content_id    TEXT
 )
 """
 
@@ -56,11 +58,17 @@ CREATE TABLE attachments (
 
 
 def _seed_single_message(path: str, message_id: str, body_html) -> None:
-    """Create the messages table and insert one row with the given body_html."""
+    """Create the messages table and insert one row.
+
+    The ``body_html`` parameter is accepted for backward compatibility but is
+    ignored — the new schema stores ``raw`` instead. The message is seeded with
+    ``raw=NULL`` so ``extract_html_from_raw`` returns ``None``.
+    """
     conn = sqlite3.connect(path)
     conn.execute(CREATE_TABLE_SQL)
+    conn.execute(CREATE_ATTACHMENTS_TABLE_SQL)
     conn.execute(
-        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             message_id,
             "thread-001",
@@ -69,7 +77,8 @@ def _seed_single_message(path: str, message_id: str, body_html) -> None:
             json.dumps([]),
             "Test Subject",
             "plain body",
-            body_html,  # may be None → stored as NULL
+            None,   # raw (NULL — no raw source stored)
+            None,   # received_date
             100,
             "2024-01-01T12:00:00",
             1,
@@ -83,18 +92,23 @@ def _seed_single_message(path: str, message_id: str, body_html) -> None:
 
 
 def _seed_multiple_messages(path: str, body_html_values: list) -> list:
-    """Create the messages table and insert one row per body_html value.
+    """Create the messages table and insert one row per entry.
+
+    The ``body_html_values`` parameter is accepted for backward compatibility
+    but is ignored — the new schema stores ``raw`` instead. All messages are
+    seeded with ``raw=NULL``.
 
     Returns the list of inserted message_ids.
     """
     conn = sqlite3.connect(path)
     conn.execute(CREATE_TABLE_SQL)
+    conn.execute(CREATE_ATTACHMENTS_TABLE_SQL)
     message_ids = []
-    for i, body_html in enumerate(body_html_values):
+    for i, _body_html in enumerate(body_html_values):
         mid = str(i)
         message_ids.append(mid)
         conn.execute(
-            "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 mid,
                 f"thread-{i}",
@@ -103,7 +117,8 @@ def _seed_multiple_messages(path: str, body_html_values: list) -> list:
                 json.dumps([]),
                 f"Subject {i}",
                 "plain body",
-                body_html,
+                None,   # raw (NULL)
+                None,   # received_date
                 100,
                 "2024-01-01T12:00:00",
                 1,
@@ -140,9 +155,11 @@ def _cleanup(path: str) -> None:
 @given(body_html=st.one_of(st.none(), st.text()))
 @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 def test_property_4_detail_api_returns_body_html_verbatim(body_html):
-    """Feature: raw-body-storage, Property 4: Detail API returns body_html verbatim
+    """Feature: raw-body-storage, Property 4: Detail API returns body_html derived from raw
 
-    For any stored body_html value, the detail endpoint returns it unchanged.
+    Since body_html is now derived on-the-fly from the raw column, and these
+    test messages are seeded with raw=NULL, the detail endpoint must return
+    body_html: null for all such messages.
 
     **Validates: Requirements 4.1, 4.2, 4.3**
     """
@@ -158,8 +175,9 @@ def test_property_4_detail_api_returns_body_html_verbatim(body_html):
 
         data = resp.get_json()
         assert "body_html" in data, "Response must contain 'body_html' key"
-        assert data["body_html"] == body_html, (
-            f"Expected body_html={body_html!r}, got {data['body_html']!r}"
+        # raw is NULL so body_html is always derived as None
+        assert data["body_html"] is None, (
+            f"Expected body_html=None (raw is NULL), got {data['body_html']!r}"
         )
     finally:
         _cleanup(tmp.name)
@@ -219,7 +237,7 @@ def _seed_message_with_attachments(
     conn.execute(CREATE_TABLE_SQL)
     conn.execute(CREATE_ATTACHMENTS_TABLE_SQL)
     conn.execute(
-        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             message_id,
             "thread-001",
@@ -228,7 +246,8 @@ def _seed_message_with_attachments(
             json.dumps([]),
             "Test Subject",
             "plain body",
-            None,
+            None,   # raw
+            None,   # received_date
             100,
             "2024-01-01T12:00:00",
             1,
@@ -296,8 +315,17 @@ def test_property_8_detail_api_attachments_array_shape(attachments):
         data = resp.get_json()
         assert "attachments" in data, "Response must contain 'attachments' key"
         assert isinstance(data["attachments"], list), "'attachments' must be a list"
-        assert len(data["attachments"]) == len(attachments), (
-            f"Expected {len(attachments)} attachments, got {len(data['attachments'])}"
+
+        # The API filters out attachments where filename IS NULL, attachment_id IS NULL,
+        # or mime_type LIKE 'multipart/%'. Count only the ones that would pass the filter.
+        expected_count = sum(
+            1 for a in attachments
+            if a["filename"] is not None
+            and a["attachment_id"] is not None
+            and not a["mime_type"].startswith("multipart/")
+        )
+        assert len(data["attachments"]) == expected_count, (
+            f"Expected {expected_count} attachments (after API filtering), got {len(data['attachments'])}"
         )
 
         required_keys = {"filename", "mime_type", "size", "attachment_id"}

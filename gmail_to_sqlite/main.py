@@ -131,6 +131,13 @@ Examples:
         default=DEFAULT_WORKERS,
         help=f"Number of worker threads for parallel fetching (default: {DEFAULT_WORKERS})",
     )
+    parser.add_argument(
+        "--test",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Fetch and insert only N messages then stop (useful for testing)",
+    )
 
     return parser
 
@@ -164,12 +171,15 @@ def main() -> None:
             db_conn = db.init(args.data_dir)
 
             if args.command == "sync":
+                # --test implies force so it always re-fetches fresh messages
+                force = args.force or (args.test is not None)
                 sync.all_messages(
                     credentials,
                     data_dir=args.data_dir,
                     full_sync=not args.delta,
-                    force=args.force,
+                    force=force,
                     num_workers=args.workers,
+                    limit=args.test,
                     check_shutdown=check_shutdown,
                 )
             elif args.command == "sync-message":

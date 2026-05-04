@@ -115,9 +115,49 @@ def _fetch_message(
 
         try:
             raw_msg = (
-                service.users().messages().get(userId="me", id=message_id).execute()
+                service.users()
+                .messages()
+                .get(userId="me", id=message_id, format="raw")
+                .execute()
             )
-            return message.Message.from_raw(raw_msg, labels)
+
+            def _apply_envelope(m: message.Message, envelope: dict) -> None:
+                """Stamp Gmail envelope fields onto a Message object."""
+                from datetime import datetime as _dt
+                m.id = envelope.get("id", message_id)
+                m.thread_id = envelope.get("threadId", "")
+                m.size = envelope.get("sizeEstimate", m.size or 0)
+                label_ids = envelope.get("labelIds", [])
+                m.labels = [labels[lid] for lid in label_ids if lid in labels]
+                m.is_read = "UNREAD" not in label_ids
+                m.is_outgoing = "SENT" in label_ids
+                if "internalDate" in envelope:
+                    m.timestamp = _dt.fromtimestamp(int(envelope["internalDate"]) / 1000)
+
+            if "raw" not in raw_msg:
+                logging.warning(
+                    f"Message {message_id} response missing 'raw' field; storing raw=None"
+                )
+                msg = message.Message()
+                _apply_envelope(msg, raw_msg)
+                msg.raw = None
+                return msg
+
+            try:
+                decoded_str = base64.urlsafe_b64decode(raw_msg["raw"]).decode("utf-8")
+            except Exception as decode_err:
+                logging.error(
+                    f"Failed to decode base64url payload for message {message_id}: {decode_err}"
+                )
+                msg = message.Message()
+                _apply_envelope(msg, raw_msg)
+                msg.raw = None
+                return msg
+
+            msg = message.Message.from_raw_source(decoded_str, labels)
+            # RFC 2822 body doesn't contain Gmail envelope fields — pull from API response.
+            _apply_envelope(msg, raw_msg)
+            return msg
 
         except HttpError as e:
             if e.resp.status >= 500 and attempt < MAX_RETRY_ATTEMPTS - 1:
@@ -217,14 +257,16 @@ def _create_service(credentials: Any) -> Any:
 def get_message_ids_from_gmail(
     service: Any,
     query: Optional[List[str]] = None,
+    limit: Optional[int] = None,
     check_shutdown: Optional[Callable[[], bool]] = None,
 ) -> List[str]:
     """
-    Fetches all message IDs from Gmail matching the query.
+    Fetches message IDs from Gmail matching the query.
 
     Args:
         service: The Gmail API service object.
         query: Optional list of query strings to filter messages.
+        limit: If set, stop collecting after this many IDs (skips pagination).
         check_shutdown: Callback that returns True if shutdown is requested.
 
     Returns:
@@ -237,13 +279,18 @@ def get_message_ids_from_gmail(
     page_token = None
     collected_count = 0
 
-    logging.info("Collecting all message IDs from Gmail...")
+    if limit is not None:
+        logging.info(f"Collecting up to {limit} message ID(s) from Gmail...")
+    else:
+        logging.info("Collecting all message IDs from Gmail...")
 
     try:
         while not (check_shutdown and check_shutdown()):
+            # When a limit is set, ask Gmail for exactly that many in one call
+            page_size = min(limit, MAX_RESULTS_PER_PAGE) if limit is not None else MAX_RESULTS_PER_PAGE
             list_params = {
                 "userId": "me",
-                "maxResults": MAX_RESULTS_PER_PAGE,
+                "maxResults": page_size,
             }
 
             if page_token:
@@ -258,6 +305,10 @@ def get_message_ids_from_gmail(
             for m_info in messages_page:
                 all_message_ids.append(m_info["id"])
                 collected_count += 1
+
+                if limit is not None and collected_count >= limit:
+                    logging.info(f"Reached limit of {limit} message ID(s).")
+                    return all_message_ids
 
                 if collected_count % COLLECTION_LOG_INTERVAL == 0:
                     logging.info(
@@ -348,6 +399,7 @@ def all_messages(
     full_sync: bool = True,
     force: bool = False,
     num_workers: int = 4,
+    limit: Optional[int] = None,
     check_shutdown: Optional[Callable[[], bool]] = None,
 ) -> int:
     """
@@ -356,9 +408,11 @@ def all_messages(
 
     Args:
         credentials (object): The credentials object used to authenticate the API request.
-        db_conn (object): The database connection object.
+        data_dir (str): Directory where attachments are cached.
         full_sync (bool): Whether to do a full sync or not.
+        force (bool): Re-fetch all messages even if already in the DB.
         num_workers (int): Number of worker threads for parallel fetching.
+        limit (int, optional): Stop after fetching this many messages (for testing).
         check_shutdown (callable): A callback function that returns True if shutdown is requested.
 
     Returns:
@@ -387,7 +441,7 @@ def all_messages(
         service = _create_service(credentials)
         labels = get_labels(service)
 
-        all_message_ids = get_message_ids_from_gmail(service, query, check_shutdown)
+        all_message_ids = get_message_ids_from_gmail(service, query, limit=limit, check_shutdown=check_shutdown)
         if check_shutdown and check_shutdown():
             logging.info(
                 "Shutdown requested during message ID collection. Exiting gracefully."
@@ -398,21 +452,25 @@ def all_messages(
             _detect_and_mark_deleted_messages(all_message_ids, check_shutdown)
 
         # For full sync, skip IDs already in the DB to avoid re-fetching,
-        # EXCEPT for messages where body_html is NULL (extraction bug fix).
+        # EXCEPT for messages where raw is NULL (need to fetch raw source).
         # --force skips all filtering and re-fetches everything.
         if full_sync and all_message_ids and not force:
             known_ids = set(db.get_all_message_ids())
-            needs_html_fix = set(db.get_message_ids_missing_html())
-            missing_ids = [mid for mid in all_message_ids if mid not in known_ids or mid in needs_html_fix]
+            needs_raw_fix = set(db.get_message_ids_missing_raw())
+            missing_ids = [mid for mid in all_message_ids if mid not in known_ids or mid in needs_raw_fix]
             logging.info(
                 f"Full sync: {len(all_message_ids)} total in Gmail, "
                 f"{len(known_ids)} already in DB, "
-                f"{len(needs_html_fix)} missing body_html, "
+                f"{len(needs_raw_fix)} missing raw, "
                 f"{len(missing_ids)} to fetch."
             )
             all_message_ids = missing_ids
         elif force:
             logging.info(f"Force sync: re-fetching all {len(all_message_ids)} messages.")
+
+        # Apply test limit as a safety net (collection should already be limited)
+        if limit is not None and len(all_message_ids) > limit:
+            all_message_ids = all_message_ids[:limit]
 
         logging.info(f"Found {len(all_message_ids)} messages to sync.")
 

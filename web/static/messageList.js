@@ -1,6 +1,14 @@
 // Message list component for the Gmail Web Viewer SPA
 // Renders the paginated message table into #message-list.
 
+/**
+ * Returns the best available display date for a message.
+ * Prefers received_date; falls back to timestamp.
+ */
+function getDisplayDate(msg) {
+  return msg.received_date || msg.timestamp;
+}
+
 function render() {
   const container = document.getElementById("message-list");
   container.innerHTML = "";
@@ -70,8 +78,9 @@ function render() {
       tr.appendChild(subjectCell);
 
       const dateCell = document.createElement("td");
-      dateCell.textContent = message.timestamp
-        ? new Date(message.timestamp).toLocaleString()
+      const displayDate = getDisplayDate(message);
+      dateCell.textContent = displayDate
+        ? new Date(displayDate).toLocaleString()
         : "";
       tr.appendChild(dateCell);
 
@@ -119,4 +128,4 @@ function render() {
   container.appendChild(pagination);
 }
 
-const messageList = { render };
+const messageList = { render, getDisplayDate };
