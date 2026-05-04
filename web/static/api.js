@@ -1,4 +1,4 @@
-// API client for the Gmail Web Viewer SPA
+// API client for the Arkchive SPA
 // Wraps fetch calls to the backend REST API with error handling.
 
 async function fetchMessages(params) {

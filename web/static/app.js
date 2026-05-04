@@ -1,4 +1,4 @@
-// App bootstrap and state management for the Gmail Web Viewer SPA
+// App bootstrap and state management for the Arkchive SPA
 // Wires together api.js, filters.js, messageList.js, and messageDetail.js.
 
 const state = {
@@ -15,6 +15,14 @@ const state = {
   labels: [],
   error: null,
   sortDir: "desc",  // "desc" | "asc"
+
+  // UI preference state (new fields)
+  theme: "light",
+  sidebarCollapsed: false,
+  readingPaneMode: "right",
+  density: "cozy",
+  activeLabel: "",
+  selectedRowIndex: -1,
 };
 
 function renderError() {
@@ -36,10 +44,10 @@ function setSyncActive(active) {
   const primaryBtn = document.getElementById("sync-primary-btn");
   const toggleBtn = document.getElementById("sync-toggle-btn");
   if (active) {
-    if (primaryBtn) { primaryBtn.disabled = true; primaryBtn.textContent = "⟳ Syncing…"; }
+    if (primaryBtn) { primaryBtn.disabled = true; primaryBtn.classList.add("spinning"); }
     if (toggleBtn) toggleBtn.disabled = true;
   } else {
-    if (primaryBtn) { primaryBtn.disabled = false; primaryBtn.textContent = "⟳ Sync New Data"; }
+    if (primaryBtn) { primaryBtn.disabled = false; primaryBtn.classList.remove("spinning"); primaryBtn.textContent = "⇄"; }
     if (toggleBtn) toggleBtn.disabled = false;
   }
 }
@@ -80,7 +88,7 @@ function setLoading(on, label) {
     if (!_syncActive) {
       const primaryBtn = document.getElementById("sync-primary-btn");
       const toggleBtn = document.getElementById("sync-toggle-btn");
-      if (primaryBtn) { primaryBtn.disabled = false; primaryBtn.textContent = "⟳ Sync New Data"; }
+      if (primaryBtn) { primaryBtn.disabled = false; primaryBtn.textContent = "⇄"; }
       if (toggleBtn) toggleBtn.disabled = false;
     }
   }
@@ -103,13 +111,22 @@ function renderSearchSummary() {
 
 async function refreshMessages() {
   const btn = document.getElementById("refresh-btn");
-  if (btn) { btn.disabled = true; btn.textContent = "↺ Refreshing…"; }
+  const list = document.getElementById("message-list");
+  const filterBar = document.getElementById("filter-bar");
+
+  // Disable table + filter bar, spin the icon — no overlay
+  if (btn) { btn.disabled = true; btn.classList.add("spinning"); }
+  if (list) list.classList.add("refreshing");
+  if (filterBar) filterBar.classList.add("loading");
+
   try {
     await loadLabels();
     await loadMessages({ suppressEmptyPrompt: true, silent: true });
     await loadStats();
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = "↺ Refresh"; }
+    if (btn) { btn.disabled = false; btn.classList.remove("spinning"); }
+    if (list) list.classList.remove("refreshing");
+    if (filterBar) filterBar.classList.remove("loading");
   }
 }
 
@@ -148,6 +165,7 @@ async function loadMessages({ suppressEmptyPrompt = false, silent = false } = {}
     renderError();
     renderSearchSummary();
     messageList.render();
+    if (typeof sidebar !== "undefined") sidebar.render();
 
     const hasFilter = state.query || state.label || state.isRead !== null || state.isOutgoing !== null;
     if (data.total === 0 && !hasFilter && !suppressEmptyPrompt) {
@@ -201,53 +219,59 @@ function labelForMode(mode) {
 async function runSync(mode) {
   closeSyncDropdown();
 
+  // Don't start a second sync if one is already running
+  if (_syncActive) return;
+
   const liveWrap = document.getElementById("sync-live-output-wrap");
   const liveOutput = document.getElementById("sync-live-output");
   const scrollBtn = document.getElementById("sync-scroll-btn");
   const outputPanel = document.getElementById("sync-output-panel");
   const outputText = document.getElementById("sync-output-text");
   const overlay = document.getElementById("loading-overlay");
+  const restoreTab = document.getElementById("sync-restore-tab");
+  const restoreLabel = document.getElementById("sync-restore-label");
+  const minimizeBtn = document.getElementById("sync-minimize-btn");
 
-  // Mark sync as active — prevents loadMessages() from re-enabling sync buttons
+  // Mark sync active — spins the ⇄ icon, disables the dropdown
   setSyncActive(true);
 
-  // Clear both the live view and the summary panel
+  // Clear log areas
   if (liveOutput) liveOutput.textContent = "";
   if (liveWrap) liveWrap.style.display = "block";
   if (outputText) outputText.textContent = "";
   if (outputPanel) outputPanel.setAttribute("hidden", "");
 
-  setLoading(true, labelForMode(mode));
+  // Start MINIMIZED — overlay stays hidden, restore tab appears immediately
+  overlay.setAttribute("hidden", "");
+  overlay.dataset.minimized = "1";
+  if (minimizeBtn) minimizeBtn.setAttribute("hidden", "");
+  if (restoreTab) {
+    restoreTab.removeAttribute("hidden");
+    if (restoreLabel) restoreLabel.textContent = labelForMode(mode);
+  }
 
   // Persist sync state so a page refresh can reconnect
-  saveSyncState(mode, false);
+  saveSyncState(mode, true);
 
-  // Enable minimize now that we're in a sync (not a plain load)
-  const minimizeBtn = document.getElementById("sync-minimize-btn");
-  if (minimizeBtn) minimizeBtn.removeAttribute("hidden");
-
-  // --- Scroll-lock logic ---
+  // --- Scroll-lock logic (used if user opens the overlay) ---
   let autoScroll = true;
+  let programmaticScroll = false;
+  let scrollPending = false;
 
   function isAtBottom() {
     if (!liveOutput) return true;
     return liveOutput.scrollHeight - liveOutput.scrollTop - liveOutput.clientHeight < 4;
   }
-
   function setScrollBtn(visible) {
     if (!scrollBtn) return;
     if (visible) scrollBtn.removeAttribute("hidden");
     else scrollBtn.setAttribute("hidden", "");
   }
-
-  let programmaticScroll = false;
-
   function onScroll() {
     if (programmaticScroll) return;
     if (isAtBottom()) { autoScroll = true; setScrollBtn(false); }
     else { autoScroll = false; setScrollBtn(true); }
   }
-
   function resumeScroll() {
     autoScroll = true;
     setScrollBtn(false);
@@ -257,11 +281,6 @@ async function runSync(mode) {
       requestAnimationFrame(() => { programmaticScroll = false; });
     }
   }
-
-  if (liveOutput) liveOutput.addEventListener("scroll", onScroll);
-  if (scrollBtn) scrollBtn.addEventListener("click", resumeScroll);
-
-  let scrollPending = false;
   function scheduleScroll() {
     if (!autoScroll || scrollPending || !liveOutput) return;
     scrollPending = true;
@@ -272,6 +291,8 @@ async function runSync(mode) {
       requestAnimationFrame(() => { programmaticScroll = false; });
     });
   }
+  if (liveOutput) liveOutput.addEventListener("scroll", onScroll);
+  if (scrollBtn) scrollBtn.addEventListener("click", resumeScroll);
 
   function cleanup() {
     if (liveOutput) liveOutput.removeEventListener("scroll", onScroll);
@@ -285,20 +306,20 @@ async function runSync(mode) {
   let syncDone = 0;
 
   function updateProgressLabel() {
+    const label = syncTotal > 0
+      ? `Syncing ${syncDone} of ${syncTotal}…`
+      : labelForMode(mode);
+    if (restoreLabel) restoreLabel.textContent = label;
     const lbl = document.getElementById("loading-label");
-    if (!lbl) return;
-    if (syncTotal > 0) {
-      lbl.textContent = `Syncing messages ${syncDone} of ${syncTotal}…`;
-    }
+    if (lbl) lbl.textContent = label;
   }
 
-  // --- Single SSE attempt — returns "done", "error", or "connection_lost" ---
+  // --- Single SSE attempt ---
   function attemptSync(attemptLabel, fromLine) {
     return new Promise((resolve) => {
       if (attemptLabel && liveOutput) {
         liveOutput.appendChild(document.createTextNode(`\n--- ${attemptLabel} ---\n`));
       }
-
       const url = `/api/sync/stream?mode=${encodeURIComponent(mode)}&workers=20&from=${fromLine || 0}`;
       const es = new EventSource(url);
       let lastLine = fromLine || 0;
@@ -317,17 +338,14 @@ async function runSync(mode) {
           syncDone += 1; updateProgressLabel();
         }
       };
-
       es.addEventListener("done", function (event) {
         es.close();
         resolve({ outcome: "done", exitCode: parseInt(event.data, 10), lastLine });
       });
-
       es.addEventListener("error", function (event) {
         es.close();
         resolve({ outcome: "error", msg: event.data || "Sync process failed", lastLine });
       });
-
       es.onerror = function () {
         es.close();
         resolve({ outcome: "connection_lost", lastLine });
@@ -335,7 +353,7 @@ async function runSync(mode) {
     });
   }
 
-  // --- Run with one automatic retry on connection loss or process crash ---
+  // --- Run with one automatic retry ---
   let result = await attemptSync(null, 0);
 
   const isFailure = result.outcome === "connection_lost" ||
@@ -345,87 +363,62 @@ async function runSync(mode) {
   if (isFailure) {
     const retryMsg = result.outcome === "connection_lost"
       ? "Connection lost — retrying…"
-      : "Sync process ended unexpectedly — retrying…";
-
-    if (liveOutput) {
-      liveOutput.appendChild(document.createTextNode(`\n⚠ ${retryMsg}\n`));
-      scheduleScroll();
-    }
-    const lbl = document.getElementById("loading-label");
-    if (lbl) lbl.textContent = retryMsg;
-
+      : "Sync ended unexpectedly — retrying…";
+    if (restoreLabel) restoreLabel.textContent = retryMsg;
+    if (liveOutput) liveOutput.appendChild(document.createTextNode(`\n⚠ ${retryMsg}\n`));
     await new Promise(r => setTimeout(r, 2000));
-
     syncTotal = 0; syncDone = 0;
-    // Resume from where we left off
     result = await attemptSync("Retry attempt", result.lastLine || 0);
   }
 
-  // --- Handle final result ---
+  // --- Finalize ---
   cleanup();
+  if (outputText) outputText.textContent = summaryLines.join("\n");
 
   const finalFailure = result.outcome === "connection_lost" ||
                        result.outcome === "error" ||
                        (result.outcome === "done" && result.exitCode !== 0);
 
-  if (outputText) outputText.textContent = summaryLines.join("\n");
+  // Always hide the full overlay and clean up minimized state
+  overlay.setAttribute("hidden", "");
+  delete overlay.dataset.minimized;
+  clearSyncState();
+  setSyncActive(false);
 
   if (finalFailure) {
-    // Show the failure panel with a "Try Again" button
     const failMsg = result.outcome === "connection_lost"
       ? "Lost connection to server during sync."
       : result.msg || "Sync finished with errors.";
 
-    if (outputPanel) {
-      outputPanel.removeAttribute("hidden");
-      outputPanel.open = true;
-    }
-
-    // Inject "Try Again" button into the output panel if not already there
-    const existingRetryBtn = document.getElementById("sync-retry-btn");
-    if (existingRetryBtn) existingRetryBtn.remove();
-
-    const retryBanner = document.createElement("div");
-    retryBanner.className = "sync-retry-banner";
-
-    const retryMsg = document.createElement("span");
-    retryMsg.textContent = "Sync failed — please try again later.";
-
-    const retryBtn = document.createElement("button");
-    retryBtn.id = "sync-retry-btn";
-    retryBtn.className = "sync-retry-btn";
-    retryBtn.textContent = "↺ Try Again";
-    retryBtn.addEventListener("click", function () {
-      retryBanner.remove();
-      runSync(mode);
-    });
-
-    retryBanner.appendChild(retryMsg);
-    retryBanner.appendChild(retryBtn);
-
-    // Insert before the output panel summary
-    const main = document.querySelector("main");
-    if (main) main.insertBefore(retryBanner, outputPanel);
+    // Hide restore tab
+    if (restoreTab) restoreTab.setAttribute("hidden", "");
 
     state.error = failMsg;
     renderError();
+    if (typeof toastManager !== "undefined") toastManager.error(failMsg);
+
+    // Show output panel so user can inspect the log
+    if (outputPanel && outputText && outputText.textContent.trim()) {
+      outputPanel.removeAttribute("hidden");
+      outputPanel.open = true;
+    }
   } else {
-    // Success
+    // Success — refresh the table using the existing refresh animation
     state.error = null;
     renderError();
     const noDbOverlay = document.getElementById("no-db-overlay");
     if (noDbOverlay) noDbOverlay.remove();
-    if (outputPanel && outputText && outputText.textContent.trim()) {
-      outputPanel.removeAttribute("hidden");
-      outputPanel.open = false;
-    }
-    loadLabels().then(() => loadMessages()).then(() => loadStats());
-  }
 
-  delete overlay.dataset.minimized;
-  clearSyncState();
-  setSyncActive(false);
-  setLoading(false);
+    if (typeof toastManager !== "undefined") toastManager.success("Sync complete");
+
+    // Reuse refreshMessages() for the post-sync reload (spins ↻, dims table)
+    await refreshMessages();
+
+    // Close the restore tab a moment after refresh completes
+    setTimeout(function () {
+      if (restoreTab) restoreTab.setAttribute("hidden", "");
+    }, 2000);
+  }
 }
 
 // Track whether a loading operation is in progress for dropdown guard
@@ -439,6 +432,65 @@ function closeSyncDropdown() {
   const toggleBtn = document.getElementById("sync-toggle-btn");
   if (dropdown) dropdown.setAttribute("hidden", "");
   if (toggleBtn) toggleBtn.setAttribute("aria-expanded", "false");
+}
+
+// ---------------------------------------------------------------------------
+// Panel layout dropdown (toolbar)
+// ---------------------------------------------------------------------------
+
+const _panelModeIcons = { none: "⬜", right: "⬜▐", below: "⬜▄" };
+const _panelModeOrder = ["none", "right", "below"];
+
+function updatePanelModeBtn(mode) {
+  const btn = document.getElementById("panel-mode-btn");
+  if (btn) btn.textContent = _panelModeIcons[mode] || "⬜";
+  // Mark active item in dropdown
+  document.querySelectorAll("#panel-dropdown li[data-mode]").forEach(function (li) {
+    li.classList.toggle("active", li.dataset.mode === mode);
+  });
+}
+
+function setPanelMode(mode) {
+  closePanelDropdown();
+  if (typeof readingPane !== "undefined") readingPane.applyMode(mode);
+  updatePanelModeBtn(mode);
+}
+
+function cyclePanelMode() {
+  const current = (typeof state !== "undefined" && state.readingPaneMode) || "none";
+  const idx = _panelModeOrder.indexOf(current);
+  const next = _panelModeOrder[(idx + 1) % _panelModeOrder.length];
+  setPanelMode(next);
+}
+
+function closePanelDropdown() {
+  const dropdown = document.getElementById("panel-dropdown");
+  const toggleBtn = document.getElementById("panel-toggle-btn");
+  if (dropdown) dropdown.setAttribute("hidden", "");
+  if (toggleBtn) toggleBtn.setAttribute("aria-expanded", "false");
+}
+
+function togglePanelDropdown(event) {
+  const dropdown = document.getElementById("panel-dropdown");
+  const toggleBtn = document.getElementById("panel-toggle-btn");
+  if (!dropdown) return;
+
+  const isOpen = !dropdown.hasAttribute("hidden");
+  if (isOpen) {
+    closePanelDropdown();
+  } else {
+    dropdown.removeAttribute("hidden");
+    if (toggleBtn) toggleBtn.setAttribute("aria-expanded", "true");
+    setTimeout(() => {
+      document.addEventListener("click", function onOutside(e) {
+        const splitBtn = document.getElementById("panel-split-btn");
+        if (splitBtn && !splitBtn.contains(e.target)) {
+          closePanelDropdown();
+          document.removeEventListener("click", onOutside);
+        }
+      });
+    }, 0);
+  }
 }
 
 function toggleSyncDropdown(event) {
@@ -695,7 +747,200 @@ async function _reconnectToSync(mode) {
   es.onerror = function () { es.close(); cleanup(); setSyncActive(false); };
 }
 
+// ---------------------------------------------------------------------------
+// Keyboard shortcut reference modal
+// ---------------------------------------------------------------------------
+
+function openShortcutModal() {
+  // Only open once
+  if (document.getElementById("shortcut-modal-overlay")) return;
+
+  const overlay = document.createElement("div");
+  overlay.id = "shortcut-modal-overlay";
+  overlay.className = "shortcut-modal-overlay";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-label", "Keyboard shortcuts");
+
+  const modal = document.createElement("div");
+  modal.className = "shortcut-modal";
+
+  const title = document.createElement("h2");
+  title.className = "shortcut-modal-title";
+  title.textContent = "Keyboard Shortcuts";
+
+  const shortcuts = [
+    { key: "⌘K / Ctrl+K", desc: "Open Command Palette" },
+    { key: "J",            desc: "Select next message" },
+    { key: "K",            desc: "Select previous message" },
+    { key: "O / Enter",    desc: "Open selected message" },
+    { key: "Escape",       desc: "Close detail or palette" },
+    { key: "R",            desc: "Trigger delta sync" },
+    { key: "?",            desc: "Show this help" },
+  ];
+
+  const table = document.createElement("table");
+  table.className = "shortcut-table";
+  const tbody = document.createElement("tbody");
+  shortcuts.forEach(function (s) {
+    const tr = document.createElement("tr");
+    const tdKey = document.createElement("td");
+    tdKey.className = "shortcut-key";
+    const kbd = document.createElement("kbd");
+    kbd.textContent = s.key;
+    tdKey.appendChild(kbd);
+    const tdDesc = document.createElement("td");
+    tdDesc.className = "shortcut-desc";
+    tdDesc.textContent = s.desc;
+    tr.appendChild(tdKey);
+    tr.appendChild(tdDesc);
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "shortcut-modal-close";
+  closeBtn.setAttribute("aria-label", "Close keyboard shortcuts");
+  closeBtn.textContent = "✕";
+  closeBtn.addEventListener("click", closeShortcutModal);
+
+  modal.appendChild(closeBtn);
+  modal.appendChild(title);
+  modal.appendChild(table);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  // Close on outside click
+  overlay.addEventListener("click", function (e) {
+    if (e.target === overlay) closeShortcutModal();
+  });
+
+  closeBtn.focus();
+}
+
+function closeShortcutModal() {
+  const overlay = document.getElementById("shortcut-modal-overlay");
+  if (overlay) overlay.remove();
+}
+
 document.addEventListener("DOMContentLoaded", async function () {
+  // ── Initialize modules (before loadLabels) ──────────────────────────────
+  if (typeof themeManager !== "undefined") themeManager.init();
+  if (typeof sidebar !== "undefined") sidebar.init();
+  if (typeof readingPane !== "undefined") readingPane.init();
+  if (typeof paneResizer !== "undefined") paneResizer.init();
+
+  // ── Wire header controls ─────────────────────────────────────────────────
+
+  // Theme toggle
+  const themeToggleBtn = document.getElementById("theme-toggle-btn");
+  if (themeToggleBtn) {
+    themeToggleBtn.addEventListener("click", function () {
+      if (typeof themeManager !== "undefined") themeManager.toggleTheme();
+    });
+  }
+
+  // Density toggle
+  const densityToggleBtn = document.getElementById("density-toggle-btn");
+  if (densityToggleBtn) {
+    densityToggleBtn.addEventListener("click", function () {
+      if (typeof themeManager !== "undefined") themeManager.toggleDensity();
+    });
+  }
+
+  // Reading pane mode selector buttons (toolbar panel dropdown)
+  // Initialise the panel button icon to match the restored mode
+  if (typeof readingPane !== "undefined") {
+    const restoredMode = state.readingPaneMode || "right";
+    updatePanelModeBtn(restoredMode);
+  }
+
+  // Legacy header reading-pane-btn wiring (kept for any remaining instances)
+  document.querySelectorAll(".reading-pane-btn[data-mode]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      const mode = btn.dataset.mode;
+      if (typeof readingPane !== "undefined") readingPane.applyMode(mode);
+      updatePanelModeBtn(mode);
+    });
+  });
+
+  // ── Global keyboard shortcut listener ───────────────────────────────────
+  document.addEventListener("keydown", function (e) {
+    const tag = document.activeElement ? document.activeElement.tagName : "";
+    const isEditable = document.activeElement && document.activeElement.isContentEditable;
+    const isTextInput = tag === "INPUT" || tag === "TEXTAREA" || isEditable;
+
+    // Cmd/Ctrl+K — always active
+    if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+      e.preventDefault();
+      if (typeof commandPalette !== "undefined") commandPalette.open();
+      return;
+    }
+
+    // Escape — always active
+    if (e.key === "Escape") {
+      // Close shortcut modal if open
+      if (document.getElementById("shortcut-modal-overlay")) {
+        closeShortcutModal();
+        return;
+      }
+      // Close command palette if open
+      if (typeof commandPalette !== "undefined") {
+        commandPalette.close();
+        return;
+      }
+      // Close message detail
+      if (state.selectedMessage) {
+        state.selectedMessage = null;
+        if (typeof messageDetail !== "undefined") messageDetail.render();
+        return;
+      }
+      return;
+    }
+
+    // Suppress all other shortcuts when a text input is focused
+    if (isTextInput) return;
+
+    if (e.key === "j" || e.key === "J") {
+      e.preventDefault();
+      if (state.messages.length === 0) return;
+      state.selectedRowIndex = Math.min(state.selectedRowIndex + 1, state.messages.length - 1);
+      if (typeof messageList !== "undefined") messageList.render();
+      return;
+    }
+
+    if (e.key === "k" || e.key === "K") {
+      e.preventDefault();
+      if (state.messages.length === 0) return;
+      state.selectedRowIndex = Math.max(state.selectedRowIndex - 1, 0);
+      if (typeof messageList !== "undefined") messageList.render();
+      return;
+    }
+
+    if (e.key === "o" || e.key === "O" || e.key === "Enter") {
+      e.preventDefault();
+      if (state.selectedRowIndex >= 0 && state.selectedRowIndex < state.messages.length) {
+        const msg = state.messages[state.selectedRowIndex];
+        if (msg && typeof state.onMessageSelect === "function") {
+          state.onMessageSelect(msg.message_id);
+        }
+      }
+      return;
+    }
+
+    if (e.key === "r" || e.key === "R") {
+      e.preventDefault();
+      runSync("delta");
+      return;
+    }
+
+    if (e.key === "?") {
+      e.preventDefault();
+      openShortcutModal();
+      return;
+    }
+  });
+
   // Minimize / restore sync window
   const minimizeBtn = document.getElementById("sync-minimize-btn");
   const restoreTab = document.getElementById("sync-restore-tab");
@@ -709,7 +954,6 @@ document.addEventListener("DOMContentLoaded", async function () {
       if (restoreTab) restoreTab.removeAttribute("hidden");
       const savedSync = loadSyncState();
       if (savedSync) saveSyncState(savedSync.mode, true);
-      refreshMessages();
     });
   }
 
@@ -775,9 +1019,38 @@ document.addEventListener("DOMContentLoaded", async function () {
     });
   }
 
+  // ── Launch screen progress ───────────────────────────────────────────────
+  function launchProgress(pct, status) {
+    const bar = document.getElementById("launch-progress-bar");
+    const lbl = document.getElementById("launch-status");
+    if (bar) bar.style.width = pct + "%";
+    if (lbl) lbl.textContent = status;
+  }
+
+  function launchDone() {
+    const screen = document.getElementById("launch-screen");
+    if (screen) {
+      screen.classList.add("launch-hidden");
+      // Remove from DOM after transition completes
+      screen.addEventListener("transitionend", function () {
+        screen.remove();
+      }, { once: true });
+    }
+  }
+
+  launchProgress(10, "Initializing…");
+
   await loadLabels();
+  launchProgress(50, "Loading messages…");
+
   await loadMessages();
+  launchProgress(85, "Loading stats…");
+
   await loadStats();
+  launchProgress(100, "Ready");
+
+  // Brief pause so the 100% bar is visible before fading out
+  setTimeout(launchDone, 300);
 
   // --- Reconnect to in-progress sync after page refresh ---
   try {

@@ -3,10 +3,38 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Gmail Web Viewer</title>
+  <title>Arkchive</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png" />
+  <!-- Apply theme before first paint to avoid flash of wrong theme on launch screen -->
+  <script>
+    (function () {
+      var stored;
+      try { stored = localStorage.getItem("arkchive-theme"); } catch (_) {}
+      if (stored !== "light" && stored !== "dark") {
+        stored = "dark";
+        try { localStorage.setItem("arkchive-theme", "dark"); } catch (_) {}
+      }
+      document.documentElement.setAttribute("data-theme", stored);
+    }());
+  </script>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
+  <!-- ============================================================
+       LAUNCH SCREEN — shown on initial page load, fades out when ready
+       ============================================================ -->
+  <div id="launch-screen">
+    <div class="launch-content">
+      <div class="launch-logo">
+        <img src="/static/logo-dark-vertical.png" alt="Arkchive" class="launch-logo-img" />
+      </div>
+      <div class="launch-progress-wrap">
+        <div class="launch-progress-bar" id="launch-progress-bar"></div>
+      </div>
+      <div class="launch-status" id="launch-status">Loading…</div>
+    </div>
+  </div>
+  <!-- Loading overlay (full-screen, shown during sync) -->
   <div id="loading-overlay">
     <div class="loading-card">
       <button id="sync-minimize-btn" hidden title="Minimize sync window" aria-label="Minimize sync window">—</button>
@@ -18,68 +46,239 @@
       </div>
     </div>
   </div>
+
+  <!-- Floating restore tab shown when sync window is minimized -->
   <button id="sync-restore-tab" hidden aria-label="Restore sync window">
     <span class="sync-restore-spinner"></span>
     <span id="sync-restore-label">Syncing…</span>
   </button>
-  <header>
-    <h1>Gmail Web Viewer</h1>
-    <div class="header-actions">
-      <button id="refresh-btn" title="Refresh message list" aria-label="Refresh message list" onclick="refreshMessages()">↺ Refresh</button>
-      <div class="sync-split-btn" id="sync-split-btn">
-      <button
-        id="sync-primary-btn"
-        class="sync-primary"
-        onclick="runSync('delta')"
-      >⟳ Sync New Data</button>
-      <button
-        id="sync-toggle-btn"
-        class="sync-toggle"
-        aria-haspopup="true"
-        aria-expanded="false"
-        aria-label="More sync options"
-        onclick="toggleSyncDropdown(event)"
-      >▾</button>
-      <ul
-        id="sync-dropdown"
-        class="sync-dropdown-menu"
-        role="menu"
-        hidden
-      >
-        <li role="menuitem" tabindex="-1" onclick="runSync('delta')">⟳ Sync New Data</li>
-        <li role="menuitem" tabindex="-1" onclick="runSync('force')">⟳ Sync All (Forced)</li>
-        <li role="menuitem" tabindex="-1" onclick="runSync('missing')">⟳ Sync Missing</li>
-        <li role="menuitem" tabindex="-1" onclick="runSync('test')">⟳ Sync 10k (test)</li>
+
+  <!-- Toast notification container (bottom-right, screen-reader live region) -->
+  <div id="toast-container" aria-live="polite" aria-atomic="false"></div>
+
+  <!-- Command palette placeholder (rendered by commandPalette.js) -->
+  <div id="command-palette-container"></div>
+
+  <!-- Attachment modal placeholder (rendered by messageDetail.js / attachments.js) -->
+  <div id="attachment-modal-container"></div>
+
+  <!-- ============================================================
+       APP SHELL — CSS Grid: header / sidebar / content
+       ============================================================ -->
+  <div class="app-shell">
+
+    <!-- ── HEADER ─────────────────────────────────────────────── -->
+    <header id="app-header" class="app-header">
+      <!-- Left: hamburger (mobile only) + app logo / name -->
+      <div class="header-left">
+        <button
+          id="hamburger-btn"
+          aria-label="Open navigation menu"
+          title="Open navigation menu"
+          onclick="sidebar.toggle()"
+        >☰</button>
+        <img src="/static/logo-dark-horizontal.png" alt="Arkchive" class="header-logo-img" />
+      </div>
+
+      <!-- Centre: empty, reserved for future use -->
+      <div class="header-centre"></div>
+
+      <!-- Right: density toggle, theme toggle, ⌘K hint -->
+      <div class="header-actions">
+        <!-- Density toggle -->
+        <button
+          id="density-toggle-btn"
+          aria-label="Toggle compact/cozy density"
+          title="Toggle density"
+        >⊞</button>
+
+        <!-- Theme toggle -->
+        <button
+          id="theme-toggle-btn"
+          aria-label="Switch to light theme"
+          title="Switch to light theme"
+          data-active="true"
+        >🌙</button>
+
+        <!-- ⌘K hint label -->
+        <span class="cmd-k-hint" aria-hidden="true">⌘K</span>
+      </div>
+    </header>
+
+    <!-- ── SIDEBAR ─────────────────────────────────────────────── -->
+    <nav id="sidebar" aria-label="Navigation">
+      <ul role="list">
+        <!-- Populated by sidebar.js -->
       </ul>
-    </div>
-    </div>
-  </header>
+      <div class="sidebar-read-filter">
+        <!-- Read/unread filter toggle populated by sidebar.js -->
+      </div>
+      <div class="sidebar-footer">
+        <button
+          id="sidebar-toggle"
+          aria-label="Collapse sidebar"
+          title="Collapse sidebar"
+          aria-expanded="true"
+        ></button>
+      </div>
+    </nav>
 
-  <main>
-    <div id="error-banner" hidden></div>
+    <!-- ── CONTENT AREA ────────────────────────────────────────── -->
+    <main id="content-area" data-reading-pane="right">
 
-    <div id="filter-bar"></div>
+      <!-- Message list container -->
+      <div id="message-list-container">
+        <div id="error-banner" hidden></div>
 
-    <div id="search-summary" hidden></div>
+        <!-- ── LIST TOOLBAR ──────────────────────────────────── -->
+        <div id="list-toolbar" class="list-toolbar">
 
-    <div id="message-list"></div>
+          <!-- Refresh -->
+          <button
+            id="refresh-btn"
+            class="toolbar-btn"
+            title="Refresh"
+            aria-label="Refresh message list"
+            onclick="refreshMessages()"
+          >↻</button>
 
-    <details id="sync-output-panel" hidden>
-      <summary>Last sync output</summary>
-      <pre id="sync-output-text"></pre>
-    </details>
+          <!-- Sync split-button -->
+          <div class="toolbar-split-btn" id="sync-split-btn">
+            <button
+              id="sync-primary-btn"
+              class="toolbar-btn toolbar-split-primary"
+              title="Sync new data"
+              aria-label="Sync new data"
+              onclick="runSync('delta')"
+            >⇄</button>
+            <button
+              id="sync-toggle-btn"
+              class="toolbar-btn toolbar-split-arrow"
+              aria-haspopup="true"
+              aria-expanded="false"
+              aria-label="More sync options"
+              onclick="toggleSyncDropdown(event)"
+            >▾</button>
+            <ul
+              id="sync-dropdown"
+              class="toolbar-dropdown-menu"
+              role="menu"
+              hidden
+            >
+              <li role="menuitem" tabindex="-1" onclick="runSync('delta')">⇄ Sync New Data</li>
+              <li role="menuitem" tabindex="-1" onclick="runSync('force')">⇄ Sync All (Forced)</li>
+              <li role="menuitem" tabindex="-1" onclick="runSync('missing')">⇄ Sync Missing</li>
+              <li role="menuitem" tabindex="-1" onclick="runSync('test')">⇄ Sync 10k (test)</li>
+            </ul>
+          </div>
 
-    <div id="message-detail" hidden></div>
-  </main>
+          <!-- Panel layout dropdown -->
+          <div class="toolbar-split-btn" id="panel-split-btn">
+            <button
+              id="panel-mode-btn"
+              class="toolbar-btn toolbar-split-primary"
+              title="Cycle reading pane layout"
+              aria-label="Cycle reading pane layout"
+              onclick="cyclePanelMode()"
+            >⬜</button>
+            <button
+              id="panel-toggle-btn"
+              class="toolbar-btn toolbar-split-arrow"
+              aria-haspopup="true"
+              aria-expanded="false"
+              aria-label="Reading pane options"
+              onclick="togglePanelDropdown(event)"
+            >▾</button>
+            <ul
+              id="panel-dropdown"
+              class="toolbar-dropdown-menu"
+              role="menu"
+              hidden
+            >
+              <li role="menuitem" tabindex="-1" data-mode="none"  onclick="setPanelMode('none')">⬜ Off</li>
+              <li role="menuitem" tabindex="-1" data-mode="right" onclick="setPanelMode('right')">⬜▐ Right</li>
+              <li role="menuitem" tabindex="-1" data-mode="below" onclick="setPanelMode('below')">⬜▄ Below</li>
+            </ul>
+          </div>
 
+        </div>
+        <!-- ── END LIST TOOLBAR ───────────────────────────────── -->
+
+        <div id="filter-bar"></div>
+
+        <div id="search-summary" hidden></div>
+
+        <div id="message-list" role="list"></div>
+
+        <!-- Message detail modal (used when reading pane mode is "none") -->
+        <div id="message-detail-overlay" hidden>
+          <div id="message-detail"></div>
+        </div>
+      </div>
+
+      <!-- Vertical resize handle (right pane mode) -->
+      <div id="rp-resize-right" aria-hidden="true" title="Drag to resize"></div>
+
+      <!-- Horizontal resize handle (below pane mode) -->
+      <div id="rp-resize-below" aria-hidden="true" title="Drag to resize"></div>
+
+      <!-- Reading pane (shown when mode is "right" or "below") -->
+      <div id="reading-pane" aria-label="Message preview" role="region">
+        <!-- Populated by readingPane.js -->
+      </div>
+
+      <!-- Sync output panel — kept as direct child of main so app.js insertBefore works -->
+      <details id="sync-output-panel" hidden style="grid-column: 1 / -1;">
+        <summary>Last sync output</summary>
+        <pre id="sync-output-text"></pre>
+      </details>
+
+    </main>
+
+  </div><!-- /.app-shell -->
+
+  <!-- DB stats footer (existing) -->
   <footer id="db-stats-footer" class="db-stats-footer" hidden>
     <span id="db-stats"></span>
   </footer>
 
+  <!-- ============================================================
+       SCRIPTS
+       ============================================================ -->
+  <!-- themeManager must load before app.js so theme is applied before render -->
+  <script src="/static/themeManager.js"></script>
   <script src="/static/api.js"></script>
   <script src="/static/filters.js"></script>
   <script src="/static/messageList.js"></script>
   <script src="/static/messageDetail.js"></script>
+  <script src="/static/sidebar.js"></script>
+  <script src="/static/readingPane.js"></script>
+  <script src="/static/commandPalette.js"></script>
+  <script src="/static/toastManager.js"></script>
+  <script src="/static/paneResizer.js"></script>
   <script src="/static/app.js"></script>
+
+  <script>
+    // Scroll listener: add drop-shadow to header when message list is scrolled
+    (function () {
+      var header = document.getElementById('app-header');
+      var listContainer = document.getElementById('message-list-container');
+      if (!header) return;
+      function onScroll() {
+        var scrollTop = listContainer ? listContainer.scrollTop : window.scrollY;
+        if (scrollTop > 0) {
+          header.classList.add('scrolled');
+        } else {
+          header.classList.remove('scrolled');
+        }
+      }
+      if (listContainer) {
+        listContainer.addEventListener('scroll', onScroll, { passive: true });
+      } else {
+        window.addEventListener('scroll', onScroll, { passive: true });
+      }
+      onScroll();
+    }());
+  </script>
 </body>
 </html>

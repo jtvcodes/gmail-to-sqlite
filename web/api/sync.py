@@ -6,6 +6,8 @@ import time
 
 from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
 
+from web.db import ensure_indexes, invalidate_count_cache
+
 sync_bp = Blueprint("sync", __name__)
 
 _VALID_MODES = {"delta", "force", "missing", "test"}
@@ -57,6 +59,16 @@ class SyncSession:
             with self._cond:
                 self.exit_code = rc
                 self._cond.notify_all()
+            # Invalidate the count cache and rebuild indexes so the UI
+            # shows fresh totals immediately after sync completes.
+            try:
+                from flask import current_app
+                db_path = current_app.config.get("DB_PATH", "")
+                if db_path:
+                    ensure_indexes(db_path)
+            except RuntimeError:
+                pass  # No app context outside a request — safe to skip
+            invalidate_count_cache()
 
     @property
     def running(self) -> bool:

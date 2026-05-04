@@ -57,3 +57,4 @@ Thumbs.db
 dmypy.json
 
 node_modules/
+.kiro/

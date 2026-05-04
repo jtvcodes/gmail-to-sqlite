@@ -7,7 +7,29 @@ import sys
 
 from flask import Blueprint, current_app, jsonify, make_response, request
 
-from web.db import get_db, has_sort_date_column, ensure_indexes
+from web.db import get_db, has_sort_date_column, ensure_indexes, get_cached_count, invalidate_count_cache
+
+# Module-level cache: whether the has_attachments stored column exists.
+# Checked once per process — the column never disappears once added.
+_has_attachments_col: bool | None = None
+_has_attachments_col_lock = __import__("threading").Lock()
+
+
+def _has_stored_attachments_col(db) -> bool:
+    """Return True if messages table has a stored has_attachments column."""
+    global _has_attachments_col
+    with _has_attachments_col_lock:
+        if _has_attachments_col is not None:
+            return _has_attachments_col
+        try:
+            row = db.execute(
+                "SELECT 1 FROM pragma_table_info('messages') WHERE name='has_attachments'"
+            ).fetchone()
+            _has_attachments_col = row is not None
+            return _has_attachments_col
+        except Exception:
+            _has_attachments_col = False
+            return False
 from gmail_to_sqlite.message import extract_html_from_raw, extract_attachment_from_raw, extract_attachment_by_content_id
 
 logger = logging.getLogger(__name__)
@@ -175,18 +197,27 @@ def list_messages():
     try:
         db = get_db()
 
-        # total count
+        # total count (cached to avoid full-table scan on every page load)
         count_sql = f"SELECT COUNT(*) FROM messages {where_sql}"
-        total = db.execute(count_sql, params).fetchone()[0]
+        total = get_cached_count(db, count_sql, params)
 
         # paginated results
         offset = (page - 1) * page_size
         fields_sql = ", ".join(SUMMARY_FIELDS)
+
+        # Use stored has_attachments column if available (avoids 50 correlated subqueries)
+        if _has_stored_attachments_col(db):
+            has_att_expr = "has_attachments"
+        else:
+            has_att_expr = (
+                "EXISTS(SELECT 1 FROM attachments a WHERE a.message_id = messages.message_id "
+                "  AND a.filename IS NOT NULL "
+                "  AND a.mime_type NOT LIKE 'multipart/%')"
+            )
+
         data_sql = (
             f"SELECT {fields_sql}, "
-            f"EXISTS(SELECT 1 FROM attachments a WHERE a.message_id = messages.message_id "
-            f"  AND a.filename IS NOT NULL "
-            f"  AND a.mime_type NOT LIKE 'multipart/%') AS has_attachments "
+            f"{has_att_expr} AS has_attachments "
             f"FROM messages {where_sql} "
             f"{order_sql} "
             f"LIMIT ? OFFSET ?"

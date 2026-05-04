@@ -1,4 +1,4 @@
-// Message detail component for the Gmail Web Viewer SPA
+// Message detail component for the Arkchive SPA
 // Renders the detail panel into #message-detail.
 
 let activeView = "html";
@@ -13,33 +13,56 @@ function formatRecipient(r) {
 function render() {
   activeView = "html";
 
+  const overlay = document.getElementById("message-detail-overlay");
   const panel = document.getElementById("message-detail");
 
   if (!state.selectedMessage) {
-    panel.setAttribute("hidden", "");
+    if (overlay) overlay.setAttribute("hidden", "");
     return;
   }
 
   const msg = state.selectedMessage;
   panel.innerHTML = "";
-  panel.removeAttribute("hidden");
+  if (overlay) {
+    overlay.removeAttribute("hidden");
 
-  // Close button
+    // Close on backdrop click (click on overlay but not the modal card)
+    overlay.onclick = function (e) {
+      if (e.target === overlay) {
+        state.selectedMessage = null;
+        overlay.setAttribute("hidden", "");
+        state.onMessageClose();
+      }
+    };
+  }
+
+  // ── Sticky close bar ──────────────────────────────────────────────────────
+  const closeBar = document.createElement("div");
+  closeBar.className = "detail-close-bar";
+
   const closeBtn = document.createElement("button");
   closeBtn.className = "detail-close";
+  closeBtn.setAttribute("aria-label", "Close message detail");
   closeBtn.textContent = "✕";
   closeBtn.addEventListener("click", function () {
     state.selectedMessage = null;
-    panel.setAttribute("hidden", "");
+    const overlay = document.getElementById("message-detail-overlay");
+    if (overlay) overlay.setAttribute("hidden", "");
     state.onMessageClose();
   });
-  panel.appendChild(closeBtn);
+  closeBar.appendChild(closeBtn);
+  panel.appendChild(closeBar);
+
+  // ── Scrollable content area ───────────────────────────────────────────────
+  const content = document.createElement("div");
+  content.className = "detail-content";
+  panel.appendChild(content);
 
   // Subject
   const subject = document.createElement("h2");
   subject.className = "detail-subject";
   subject.textContent = msg.subject || "(no subject)";
-  panel.appendChild(subject);
+  content.appendChild(subject);
 
   // Create iframe early so toggle button can reference it
   const bodyDiv = document.createElement("div");
@@ -56,7 +79,7 @@ function render() {
   if (toggleBtn !== null) {
     toggleWrap.appendChild(toggleBtn);
   }
-  panel.appendChild(toggleWrap);
+  content.appendChild(toggleWrap);
 
   // Meta block
   const meta = document.createElement("div");
@@ -127,7 +150,7 @@ function render() {
     meta.appendChild(viewSourceLine);
   }
 
-  panel.appendChild(meta);
+  content.appendChild(meta);
 
   // Labels
   const labelsDiv = document.createElement("div");
@@ -138,7 +161,7 @@ function render() {
     span.textContent = label;
     labelsDiv.appendChild(span);
   });
-  panel.appendChild(labelsDiv);
+  content.appendChild(labelsDiv);
 
   // Attachments section
   const attachments = msg.attachments || [];
@@ -199,11 +222,11 @@ function render() {
       attachDiv.appendChild(item);
     });
 
-    panel.appendChild(attachDiv);
+    content.appendChild(attachDiv);
   }
 
   // Body — append the already-created bodyDiv and render content
-  panel.appendChild(bodyDiv);
+  content.appendChild(bodyDiv);
 
   // Write content after appending so contentDocument is available
   renderBody(iframe, msg, activeView);
@@ -365,6 +388,9 @@ function openAttachmentPreview(att, dataUrl, allAttachments, currentIndex) {
   const list = allAttachments && allAttachments.length > 0 ? allAttachments : [att];
   let idx = (currentIndex !== undefined && currentIndex >= 0) ? currentIndex : 0;
 
+  // Remember the element that triggered the popover so we can restore focus on close
+  const triggerElement = document.activeElement || null;
+
   function attDataUrl(a) {
     return a.attachment_id
       ? "/api/messages/" + (a._messageId || att._messageId || "") + "/attachments/" + a.attachment_id + "/data"
@@ -378,9 +404,20 @@ function openAttachmentPreview(att, dataUrl, allAttachments, currentIndex) {
   const overlay = document.createElement("div");
   overlay.id = "attachment-preview-modal";
   overlay.className = "attachment-preview-overlay";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-label", "Attachment preview");
+
+  function closeModal() {
+    overlay.remove();
+    document.removeEventListener("keydown", onKeyDown);
+    if (triggerElement && typeof triggerElement.focus === "function") {
+      triggerElement.focus();
+    }
+  }
 
   overlay.addEventListener("click", function (e) {
-    if (e.target === overlay) overlay.remove();
+    if (e.target === overlay) closeModal();
   });
 
   const modal = document.createElement("div");
@@ -400,12 +437,20 @@ function openAttachmentPreview(att, dataUrl, allAttachments, currentIndex) {
   downloadBtn.className = "attachment-preview-download";
   downloadBtn.textContent = "⬇ Download";
 
+  const printBtn = document.createElement("button");
+  printBtn.className = "attachment-preview-print";
+  printBtn.textContent = "🖨 Print";
+  printBtn.addEventListener("click", function () {
+    window.print();
+  });
+
   const closeBtn = document.createElement("button");
   closeBtn.className = "attachment-preview-close";
   closeBtn.textContent = "✕";
-  closeBtn.addEventListener("click", function () { overlay.remove(); });
+  closeBtn.addEventListener("click", function () { closeModal(); });
 
   actions.appendChild(downloadBtn);
+  actions.appendChild(printBtn);
   actions.appendChild(closeBtn);
   header.appendChild(title);
   header.appendChild(actions);
@@ -519,15 +564,42 @@ function openAttachmentPreview(att, dataUrl, allAttachments, currentIndex) {
   // Initial render
   navigateTo(idx);
 
+  // Focus the close button when the modal opens
+  setTimeout(function () { closeBtn.focus(); }, 0);
+
+  // Focus trap helper — returns all currently focusable elements within the overlay
+  function getFocusable() {
+    return Array.from(overlay.querySelectorAll(
+      'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    ));
+  }
+
   // Keyboard navigation
   function onKeyDown(e) {
     if (e.key === "Escape") {
-      overlay.remove();
-      document.removeEventListener("keydown", onKeyDown);
+      closeModal();
     } else if (e.key === "ArrowLeft" && idx > 0) {
       navigateTo(idx - 1);
     } else if (e.key === "ArrowRight" && idx < list.length - 1) {
       navigateTo(idx + 1);
+    } else if (e.key === "Tab") {
+      const focusable = getFocusable();
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey) {
+        // Shift+Tab: if focus is on first element, wrap to last
+        if (document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else {
+        // Tab: if focus is on last element, wrap to first
+        if (document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     }
   }
   document.addEventListener("keydown", onKeyDown);

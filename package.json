@@ -2,7 +2,7 @@
   "name": "gmail-web-viewer-frontend-tests",
   "version": "1.0.0",
   "private": true,
-  "description": "Frontend property-based tests for the Gmail Web Viewer",
+  "description": "Frontend property-based tests for Arkchive",
   "scripts": {
     "test": "jest",
     "test:frontend": "jest web/tests/test_sync_frontend_properties.test.js"

@@ -4,7 +4,7 @@ import sys
 
 from flask import Flask, send_from_directory
 
-from web.db import close_db, ensure_indexes
+from web.db import close_db, ensure_indexes, prewarm_db
 from web.api.messages import messages_bp
 from web.api.labels import labels_bp
 from web.api.sync import sync_bp
@@ -31,6 +31,9 @@ def create_app(db_path: str) -> Flask:
     # Create performance indexes on startup (safe no-op if they already exist)
     ensure_indexes(db_path)
 
+    # Warm the OS page cache in the background so the first request is fast.
+    prewarm_db(db_path)
+
     # 2.5 — register blueprints under /api
     app.register_blueprint(messages_bp, url_prefix="/api")
     app.register_blueprint(labels_bp, url_prefix="/api")
@@ -50,7 +53,7 @@ def create_app(db_path: str) -> Flask:
 
 def main() -> None:
     # 2.2 — parse CLI arguments
-    parser = argparse.ArgumentParser(description="Gmail Web Viewer — Flask server")
+    parser = argparse.ArgumentParser(description="Arkchive — Flask server")
     parser.add_argument(
         "--port",
         type=int,

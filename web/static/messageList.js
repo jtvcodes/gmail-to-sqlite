@@ -1,4 +1,4 @@
-// Message list component for the Gmail Web Viewer SPA
+// Message list component for the Arkchive SPA
 // Renders the paginated message table into #message-list.
 
 /**
@@ -16,8 +16,30 @@ function render() {
   // Messages arrive pre-sorted from the API
   const sorted = state.messages || [];
 
+  // Empty state — render directly into container, no table
+  if (sorted.length === 0) {
+    const emptyState = document.createElement("div");
+    emptyState.className = "empty-state";
+
+    const icon = document.createElement("span");
+    icon.className = "empty-state-icon";
+    icon.textContent = "📭";
+
+    const text = document.createElement("span");
+    text.textContent = "No messages found.";
+
+    emptyState.appendChild(icon);
+    emptyState.appendChild(text);
+    container.appendChild(emptyState);
+
+    // Still render pagination below
+    renderPagination(container);
+    return;
+  }
+
   // Build table
   const table = document.createElement("table");
+  table.setAttribute("aria-label", "Message list");
 
   // Header
   const thead = document.createElement("thead");
@@ -43,63 +65,88 @@ function render() {
 
   // Body
   const tbody = document.createElement("tbody");
+  tbody.setAttribute("role", "rowgroup");
 
-  if (sorted.length === 0) {
-    const emptyRow = document.createElement("tr");
-    const emptyCell = document.createElement("td");
-    emptyCell.colSpan = 4;
-    emptyCell.textContent = "No messages found.";
-    emptyRow.appendChild(emptyCell);
-    tbody.appendChild(emptyRow);
-  } else {
-    sorted.forEach(function (message) {
-      const tr = document.createElement("tr");
+  sorted.forEach(function (message, index) {
+    const tr = document.createElement("tr");
+    tr.setAttribute("role", "row");
 
-      if (message.is_read === false) tr.classList.add("unread");
-      if (message.is_deleted === true) tr.classList.add("deleted");
+    if (message.is_read === false) tr.classList.add("unread");
+    if (message.is_deleted === true) tr.classList.add("deleted");
 
-      tr.addEventListener("click", function () {
-        state.onMessageSelect(message.message_id);
-      });
+    // Restore selected highlight if this row was previously selected
+    if (state.selectedRowIndex === index) tr.classList.add("selected");
 
-      const fromCell = document.createElement("td");
-      const sender = message.sender || {};
-      fromCell.textContent = sender.name || sender.email || "";
-      tr.appendChild(fromCell);
+    // Single click: update selection and open in reading pane or call onMessageSelect
+    tr.addEventListener("click", function () {
+      // Remove selected class from previously selected row
+      const prevSelected = tbody.querySelector("tr.selected");
+      if (prevSelected) prevSelected.classList.remove("selected");
 
-      const subjectCell = document.createElement("td");
-      subjectCell.textContent = message.subject || "(no subject)";
-      if (message.has_attachments) {
-        const clip = document.createElement("span");
-        clip.textContent = " 📎";
-        clip.title = "View attachments";
-        clip.className = "attachment-clip";
-        clip.addEventListener("click", function (e) {
-          e.stopPropagation(); // don't open the message
-          openAttachmentPopover(clip, message.message_id);
-        });
-        subjectCell.appendChild(clip);
+      // Mark this row as selected
+      tr.classList.add("selected");
+      state.selectedRowIndex = index;
+
+      // Determine where to open the message
+      const mode = state.readingPaneMode;
+      if ((mode === "right" || mode === "below") && typeof readingPane !== "undefined") {
+        // Fetch the full message (body_html, recipients, attachments, raw) then render
+        readingPane.loadAndRender(message.message_id);
+      } else {
+        if (typeof state.onMessageSelect === "function") {
+          state.onMessageSelect(message.message_id);
+        }
       }
-      tr.appendChild(subjectCell);
-
-      const dateCell = document.createElement("td");
-      const displayDate = getDisplayDate(message);
-      dateCell.textContent = displayDate
-        ? new Date(displayDate).toLocaleString()
-        : "";
-      tr.appendChild(dateCell);
-
-      const statusCell = document.createElement("td");
-      statusCell.textContent = message.is_read === false ? "Unread" : "Read";
-      tr.appendChild(statusCell);
-
-      tbody.appendChild(tr);
     });
-  }
+
+    // Double click: always open full message detail
+    tr.addEventListener("dblclick", function () {
+      if (typeof state.onMessageSelect === "function") {
+        state.onMessageSelect(message.message_id);
+      }
+    });
+
+    const fromCell = document.createElement("td");
+    const sender = message.sender || {};
+    fromCell.textContent = sender.name || sender.email || "";
+    tr.appendChild(fromCell);
+
+    const subjectCell = document.createElement("td");
+    subjectCell.textContent = message.subject || "(no subject)";
+    if (message.has_attachments) {
+      const clip = document.createElement("span");
+      clip.textContent = " 📎";
+      clip.title = "View attachments";
+      clip.className = "attachment-clip";
+      clip.addEventListener("click", function (e) {
+        e.stopPropagation(); // don't open the message
+        openAttachmentPopover(clip, message.message_id);
+      });
+      subjectCell.appendChild(clip);
+    }
+    tr.appendChild(subjectCell);
+
+    const dateCell = document.createElement("td");
+    const displayDate = getDisplayDate(message);
+    dateCell.textContent = displayDate
+      ? new Date(displayDate).toLocaleString()
+      : "";
+    tr.appendChild(dateCell);
+
+    const statusCell = document.createElement("td");
+    statusCell.textContent = message.is_read === false ? "Unread" : "Read";
+    tr.appendChild(statusCell);
+
+    tbody.appendChild(tr);
+  });
 
   table.appendChild(tbody);
   container.appendChild(table);
 
+  renderPagination(container);
+}
+
+function renderPagination(container) {
   // Pagination controls
   const totalPages = Math.ceil((state.total || 0) / (state.pageSize || 50));
   const currentPage = state.page || 1;
@@ -150,6 +197,7 @@ async function openAttachmentPopover(anchor, messageId) {
   const popover = document.createElement("div");
   popover.id = "attachment-popover";
   popover.className = "attachment-popover";
+  popover.setAttribute("role", "listbox");
   popover.dataset.messageId = messageId;
   popover.textContent = "Loading…";
   document.body.appendChild(popover);
@@ -170,6 +218,7 @@ async function openAttachmentPopover(anchor, messageId) {
       popover.remove();
       document.removeEventListener("click", onOutsideClick);
       document.removeEventListener("keydown", onEscape);
+      if (anchor && typeof anchor.focus === "function") anchor.focus();
     }
   }
   function onEscape(e) {
@@ -177,6 +226,7 @@ async function openAttachmentPopover(anchor, messageId) {
       popover.remove();
       document.removeEventListener("click", onOutsideClick);
       document.removeEventListener("keydown", onEscape);
+      if (anchor && typeof anchor.focus === "function") anchor.focus();
     }
   }
   setTimeout(function () {
@@ -220,6 +270,8 @@ async function openAttachmentPopover(anchor, messageId) {
 
     const item = document.createElement("div");
     item.className = "attachment-popover-item";
+    item.setAttribute("role", "option");
+    item.setAttribute("tabindex", "0");
 
     const icon = document.createElement("span");
     icon.textContent = attachmentIcon(att.mime_type);
@@ -256,6 +308,13 @@ async function openAttachmentPopover(anchor, messageId) {
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
+      }
+    });
+
+    item.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        item.click();
       }
     });
 

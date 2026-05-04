@@ -1,4 +1,5 @@
-# Gmail Web Viewer — `web/`
+<div align="center"><img src="static/logo-dark-horizontal.png" alt="Arkchive logo" width="300px"></div>
+
 
 A Flask-based web application that provides a browser UI for reading Gmail messages stored in the local SQLite database produced by the sync tool.
 
