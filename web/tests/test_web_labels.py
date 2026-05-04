@@ -12,20 +12,21 @@ from web.server import create_app
 
 CREATE_TABLE_SQL = """
 CREATE TABLE messages (
-    message_id   TEXT PRIMARY KEY,
-    thread_id    TEXT,
-    sender       TEXT,
-    recipients   TEXT,
-    labels       TEXT,
-    subject      TEXT,
-    body         TEXT,
-    body_html    TEXT,
-    size         INTEGER,
-    timestamp    DATETIME,
-    is_read      INTEGER,
-    is_outgoing  INTEGER,
-    is_deleted   INTEGER,
-    last_indexed DATETIME
+    message_id    TEXT PRIMARY KEY,
+    thread_id     TEXT,
+    sender        TEXT,
+    recipients    TEXT,
+    labels        TEXT,
+    subject       TEXT,
+    body          TEXT,
+    raw           TEXT,
+    received_date DATETIME,
+    size          INTEGER,
+    timestamp     DATETIME,
+    is_read       INTEGER,
+    is_outgoing   INTEGER,
+    is_deleted    INTEGER,
+    last_indexed  DATETIME
 )
 """
 
@@ -71,7 +72,8 @@ def _seed_db(path: str) -> None:
     conn = sqlite3.connect(path)
     conn.execute(CREATE_TABLE_SQL)
     conn.executemany(
-        "INSERT INTO messages VALUES (?,?,?,?,?,?,?,NULL,?,?,?,?,?,NULL)",
+        "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, subject, body, raw, received_date, size, timestamp, is_read, is_outgoing, is_deleted, last_indexed) "
+        "VALUES (?,?,?,?,?,?,?,NULL,NULL,?,?,?,?,?,NULL)",
         SEED_ROWS,
     )
     conn.commit()
@@ -168,7 +170,8 @@ class TestGetLabels:
         conn = sqlite3.connect(path)
         conn.execute(CREATE_TABLE_SQL)
         conn.execute(
-            "INSERT INTO messages VALUES (?,?,?,?,?,?,?,NULL,?,?,?,?,?,NULL)",
+            "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, subject, body, raw, received_date, size, timestamp, is_read, is_outgoing, is_deleted, last_indexed) "
+            "VALUES (?,?,?,?,?,?,?,NULL,NULL,?,?,?,?,?,NULL)",
             ("m1", "t1", "{}", "{}", '["INBOX"]', "s", "b", 1, "2024-01-01", 0, 0, 1),
         )
         conn.commit()

@@ -609,3 +609,408 @@ class TestAttachmentWebAPI:
             f"Expected 404 or 502 when attachment data is NULL and Gmail fetch fails, "
             f"got {resp.status_code}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 4.1 — GET /api/messages/stats tests
+# ---------------------------------------------------------------------------
+
+CREATE_GMAIL_INDEX_SQL = """
+CREATE TABLE gmail_index (
+    message_id  TEXT PRIMARY KEY,
+    synced      INTEGER NOT NULL DEFAULT 0
+)
+"""
+
+
+class TestMessagesStats:
+    """Tests for GET /api/messages/stats (Requirement 4.1)."""
+
+    # ------------------------------------------------------------------
+    # 11.1 — Happy-path: messages + gmail_index both present
+    # ------------------------------------------------------------------
+
+    def test_stats_happy_path(self, tmp_path):
+        """11.1 — Returns correct total_messages, total_indexed, total_unsynced
+        when both messages and gmail_index tables are populated."""
+        db_file = str(tmp_path / "stats_happy.db")
+        conn = sqlite3.connect(db_file)
+        conn.execute(CREATE_TABLE_SQL)
+        conn.execute(CREATE_GMAIL_INDEX_SQL)
+
+        # Insert 4 non-deleted messages and 1 deleted message
+        conn.executemany(
+            "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, "
+            "subject, body, raw, received_date, size, timestamp, is_read, is_outgoing, "
+            "is_deleted, last_indexed) VALUES (?,?,?,?,?,?,?,NULL,NULL,0,NULL,0,0,?,NULL)",
+            [
+                ("m1", "t1", "{}", "{}", "[]", "s1", "b1", 0),
+                ("m2", "t2", "{}", "{}", "[]", "s2", "b2", 0),
+                ("m3", "t3", "{}", "{}", "[]", "s3", "b3", 0),
+                ("m4", "t4", "{}", "{}", "[]", "s4", "b4", 0),
+                ("m5", "t5", "{}", "{}", "[]", "s5", "b5", 1),  # deleted
+            ],
+        )
+
+        # 3 indexed rows: 2 synced, 1 unsynced
+        conn.executemany(
+            "INSERT INTO gmail_index (message_id, synced) VALUES (?, ?)",
+            [("m1", 1), ("m2", 1), ("m3", 0)],
+        )
+        conn.commit()
+        conn.close()
+
+        flask_app = create_app(db_path=db_file)
+        flask_app.config["TESTING"] = True
+        client = flask_app.test_client()
+
+        resp = client.get("/api/messages/stats")
+        assert resp.status_code == 200
+        data = resp.get_json()
+
+        assert data["total_messages"] == 4   # excludes deleted
+        assert data["total_indexed"] == 3    # rows in gmail_index
+        assert data["total_unsynced"] == 1   # synced=0 rows
+
+    # ------------------------------------------------------------------
+    # 11.2 — Missing gmail_index table: graceful fallback
+    # ------------------------------------------------------------------
+
+    def test_stats_missing_gmail_index_table(self, tmp_path):
+        """11.2 — When gmail_index table does not exist, the endpoint returns
+        total_indexed == total_messages and total_unsynced == 0 (no 500)."""
+        db_file = str(tmp_path / "stats_no_index.db")
+        conn = sqlite3.connect(db_file)
+        conn.execute(CREATE_TABLE_SQL)
+
+        # Insert 3 non-deleted messages
+        conn.executemany(
+            "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, "
+            "subject, body, raw, received_date, size, timestamp, is_read, is_outgoing, "
+            "is_deleted, last_indexed) VALUES (?,?,?,?,?,?,?,NULL,NULL,0,NULL,0,0,0,NULL)",
+            [("a1", "t1", "{}", "{}", "[]", "s1", "b1"),
+             ("a2", "t2", "{}", "{}", "[]", "s2", "b2"),
+             ("a3", "t3", "{}", "{}", "[]", "s3", "b3")],
+        )
+        conn.commit()
+        conn.close()
+
+        flask_app = create_app(db_path=db_file)
+        flask_app.config["TESTING"] = True
+        client = flask_app.test_client()
+
+        resp = client.get("/api/messages/stats")
+        assert resp.status_code == 200
+        data = resp.get_json()
+
+        assert data["total_messages"] == 3
+        assert data["total_indexed"] == 3    # fallback: equals total_messages
+        assert data["total_unsynced"] == 0   # fallback: 0
+
+    # ------------------------------------------------------------------
+    # 11.3 — Missing messages table: returns zeros, not 500
+    # ------------------------------------------------------------------
+
+    def test_stats_missing_messages_table(self, tmp_path):
+        """11.3 — When messages table does not exist, the endpoint returns
+        {"total_messages": 0, "total_indexed": 0, "total_unsynced": 0} (no 500)."""
+        db_file = str(tmp_path / "stats_no_messages.db")
+        # Create an empty DB with no tables at all
+        conn = sqlite3.connect(db_file)
+        conn.commit()
+        conn.close()
+
+        flask_app = create_app(db_path=db_file)
+        flask_app.config["TESTING"] = True
+        client = flask_app.test_client()
+
+        resp = client.get("/api/messages/stats")
+        assert resp.status_code == 200
+        data = resp.get_json()
+
+        assert data == {"total_messages": 0, "total_indexed": 0, "total_unsynced": 0}
+
+
+# ---------------------------------------------------------------------------
+# 13.1–13.3 — by-filename attachment endpoint tests
+# ---------------------------------------------------------------------------
+
+import base64 as _base64
+
+# Minimal RFC 2822 multipart/mixed message with a PDF attachment.
+# The attachment payload is base64-encoded so get_payload(decode=True) works.
+_ATTACH_BYTES = b"FAKE PDF CONTENT"
+_ATTACH_B64 = _base64.b64encode(_ATTACH_BYTES).decode("ascii")
+
+_MULTIPART_WITH_ATTACHMENT = (
+    "MIME-Version: 1.0\r\n"
+    "From: sender@example.com\r\n"
+    "To: recipient@example.com\r\n"
+    "Subject: Message with attachment\r\n"
+    "Date: Mon, 05 Jan 2024 05:00:00 +0000\r\n"
+    "Content-Type: multipart/mixed; boundary=\"att_boundary\"\r\n"
+    "\r\n"
+    "--att_boundary\r\n"
+    "Content-Type: text/plain; charset=\"utf-8\"\r\n"
+    "\r\n"
+    "See attached file.\r\n"
+    "--att_boundary\r\n"
+    "Content-Type: application/pdf\r\n"
+    "Content-Disposition: attachment; filename=\"report.pdf\"\r\n"
+    "Content-Transfer-Encoding: base64\r\n"
+    "\r\n"
+    f"{_ATTACH_B64}\r\n"
+    "--att_boundary--\r\n"
+)
+
+# Minimal RFC 2822 multipart/related message with an inline PNG image.
+_IMAGE_BYTES = b"\x89PNG\r\nFAKE IMAGE DATA"
+_IMAGE_B64 = _base64.b64encode(_IMAGE_BYTES).decode("ascii")
+
+_MULTIPART_WITH_CID_IMAGE = (
+    "MIME-Version: 1.0\r\n"
+    "From: sender@example.com\r\n"
+    "To: recipient@example.com\r\n"
+    "Subject: Message with inline image\r\n"
+    "Date: Mon, 05 Jan 2024 05:00:00 +0000\r\n"
+    "Content-Type: multipart/related; boundary=\"cid_boundary\"\r\n"
+    "\r\n"
+    "--cid_boundary\r\n"
+    "Content-Type: text/html; charset=\"utf-8\"\r\n"
+    "\r\n"
+    "<html><body><img src=\"cid:inline_img_001\"></body></html>\r\n"
+    "--cid_boundary\r\n"
+    "Content-Type: image/png\r\n"
+    "Content-ID: <inline_img_001>\r\n"
+    "Content-Disposition: inline; filename=\"logo.png\"\r\n"
+    "Content-Transfer-Encoding: base64\r\n"
+    "\r\n"
+    f"{_IMAGE_B64}\r\n"
+    "--cid_boundary--\r\n"
+)
+
+
+class TestByFilenameAttachment:
+    """Tests for GET /api/messages/<id>/attachments/by-filename/<filename>/data
+    (Requirements 4.4)."""
+
+    # ------------------------------------------------------------------
+    # Fixtures
+    # ------------------------------------------------------------------
+
+    @pytest.fixture
+    def db_path_raw_attach(self, tmp_path):
+        """DB with a message whose raw source contains a PDF attachment."""
+        path = str(tmp_path / "raw_attach.db")
+        conn = sqlite3.connect(path)
+        conn.execute(CREATE_TABLE_SQL)
+        conn.execute(CREATE_ATTACHMENTS_TABLE_SQL)
+        # Insert the message with raw RFC 2822 source
+        conn.execute(
+            "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, "
+            "subject, body, raw, received_date, size, timestamp, is_read, is_outgoing, "
+            "is_deleted, last_indexed) VALUES (?,?,?,?,?,?,?,?,NULL,?,?,0,0,0,NULL)",
+            (
+                "msg_raw_attach", "thread_raw_attach",
+                '{"name": "Sender", "email": "sender@example.com"}',
+                '{"to": ["recipient@example.com"], "cc": [], "bcc": []}',
+                '["INBOX"]',
+                "Message with attachment",
+                "See attached file.",
+                _MULTIPART_WITH_ATTACHMENT,
+                len(_MULTIPART_WITH_ATTACHMENT),
+                "2024-01-05T05:00:00",
+            ),
+        )
+        # Insert a matching attachments row (no blob data — raw source is the source of truth)
+        conn.execute(
+            "INSERT INTO attachments (message_id, filename, mime_type, size, data, attachment_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("msg_raw_attach", "report.pdf", "application/pdf", len(_ATTACH_BYTES), None, None),
+        )
+        conn.commit()
+        conn.close()
+        return path
+
+    @pytest.fixture
+    def client_raw_attach(self, db_path_raw_attach):
+        from web.server import create_app
+        flask_app = create_app(db_path=db_path_raw_attach)
+        flask_app.config["TESTING"] = True
+        return flask_app.test_client()
+
+    @pytest.fixture
+    def db_path_blob_attach(self, tmp_path):
+        """DB with a message that has a DB blob attachment and no raw source."""
+        path = str(tmp_path / "blob_attach.db")
+        conn = sqlite3.connect(path)
+        conn.execute(CREATE_TABLE_SQL)
+        conn.execute(CREATE_ATTACHMENTS_TABLE_SQL)
+        conn.execute(
+            "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, "
+            "subject, body, raw, received_date, size, timestamp, is_read, is_outgoing, "
+            "is_deleted, last_indexed) VALUES (?,?,?,?,?,?,?,NULL,NULL,?,?,0,0,0,NULL)",
+            (
+                "msg_blob_attach", "thread_blob_attach",
+                '{"name": "Sender", "email": "sender@example.com"}',
+                '{"to": ["recipient@example.com"], "cc": [], "bcc": []}',
+                '["INBOX"]',
+                "Message with blob attachment",
+                "Body text.",
+                100,
+                "2024-01-05T05:00:00",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO attachments (message_id, filename, mime_type, size, data, attachment_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("msg_blob_attach", "data.bin", "application/octet-stream", 8, b"BLOBDATA", None),
+        )
+        conn.commit()
+        conn.close()
+        return path
+
+    @pytest.fixture
+    def client_blob_attach(self, db_path_blob_attach):
+        from web.server import create_app
+        flask_app = create_app(db_path=db_path_blob_attach)
+        flask_app.config["TESTING"] = True
+        return flask_app.test_client()
+
+    # ------------------------------------------------------------------
+    # 13.1 — by-filename found via raw source
+    # ------------------------------------------------------------------
+
+    def test_by_filename_raw_source_returns_200(self, client_raw_attach):
+        """13.1 — by-filename endpoint returns 200 when attachment is in raw source."""
+        resp = client_raw_attach.get(
+            "/api/messages/msg_raw_attach/attachments/by-filename/report.pdf/data"
+        )
+        assert resp.status_code == 200
+
+    def test_by_filename_raw_source_correct_bytes(self, client_raw_attach):
+        """13.1 — by-filename endpoint returns the correct bytes from raw source."""
+        resp = client_raw_attach.get(
+            "/api/messages/msg_raw_attach/attachments/by-filename/report.pdf/data"
+        )
+        assert resp.data == _ATTACH_BYTES
+
+    def test_by_filename_raw_source_correct_content_type(self, client_raw_attach):
+        """13.1 — by-filename endpoint returns the correct Content-Type from raw source."""
+        resp = client_raw_attach.get(
+            "/api/messages/msg_raw_attach/attachments/by-filename/report.pdf/data"
+        )
+        assert resp.content_type == "application/pdf"
+
+    # ------------------------------------------------------------------
+    # 13.2 — by-filename DB blob fallback
+    # ------------------------------------------------------------------
+
+    def test_by_filename_blob_fallback_returns_200(self, client_blob_attach):
+        """13.2 — by-filename endpoint returns 200 when falling back to DB blob."""
+        resp = client_blob_attach.get(
+            "/api/messages/msg_blob_attach/attachments/by-filename/data.bin/data"
+        )
+        assert resp.status_code == 200
+
+    def test_by_filename_blob_fallback_correct_bytes(self, client_blob_attach):
+        """13.2 — by-filename endpoint returns the correct blob bytes."""
+        resp = client_blob_attach.get(
+            "/api/messages/msg_blob_attach/attachments/by-filename/data.bin/data"
+        )
+        assert resp.data == b"BLOBDATA"
+
+    # ------------------------------------------------------------------
+    # 13.3 — by-filename 404 for unknown filename
+    # ------------------------------------------------------------------
+
+    def test_by_filename_404_for_unknown_filename(self, client_raw_attach):
+        """13.3 — by-filename endpoint returns 404 when filename does not exist."""
+        resp = client_raw_attach.get(
+            "/api/messages/msg_raw_attach/attachments/by-filename/nonexistent.xyz/data"
+        )
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 13.4–13.5 — GET /api/cid/<content_id> tests
+# ---------------------------------------------------------------------------
+
+
+class TestCidImage:
+    """Tests for GET /api/cid/<content_id> (Requirements 4.6)."""
+
+    # ------------------------------------------------------------------
+    # Fixtures
+    # ------------------------------------------------------------------
+
+    @pytest.fixture
+    def db_path_cid(self, tmp_path):
+        """DB with a message whose raw source contains an inline image with Content-ID."""
+        path = str(tmp_path / "cid_image.db")
+        conn = sqlite3.connect(path)
+        conn.execute(CREATE_TABLE_SQL)
+        conn.execute(CREATE_ATTACHMENTS_TABLE_SQL)
+        conn.execute(
+            "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, "
+            "subject, body, raw, received_date, size, timestamp, is_read, is_outgoing, "
+            "is_deleted, last_indexed) VALUES (?,?,?,?,?,?,?,?,NULL,?,?,0,0,0,NULL)",
+            (
+                "msg_cid", "thread_cid",
+                '{"name": "Sender", "email": "sender@example.com"}',
+                '{"to": ["recipient@example.com"], "cc": [], "bcc": []}',
+                '["INBOX"]',
+                "Message with inline image",
+                "See inline image.",
+                _MULTIPART_WITH_CID_IMAGE,
+                len(_MULTIPART_WITH_CID_IMAGE),
+                "2024-01-05T05:00:00",
+            ),
+        )
+        # Insert an attachments row with content_id so the endpoint can find the message
+        conn.execute(
+            "INSERT INTO attachments (message_id, filename, mime_type, size, data, "
+            "attachment_id, content_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "msg_cid", "logo.png", "image/png", len(_IMAGE_BYTES),
+                None, None, "inline_img_001",
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return path
+
+    @pytest.fixture
+    def client_cid(self, db_path_cid):
+        from web.server import create_app
+        flask_app = create_app(db_path=db_path_cid)
+        flask_app.config["TESTING"] = True
+        return flask_app.test_client()
+
+    # ------------------------------------------------------------------
+    # 13.4 — CID found via raw source
+    # ------------------------------------------------------------------
+
+    def test_cid_found_returns_200(self, client_cid):
+        """13.4 — GET /api/cid/<content_id> returns 200 when the inline image exists."""
+        resp = client_cid.get("/api/cid/inline_img_001?msg=msg_cid")
+        assert resp.status_code == 200
+
+    def test_cid_found_correct_bytes(self, client_cid):
+        """13.4 — GET /api/cid/<content_id> returns the correct image bytes."""
+        resp = client_cid.get("/api/cid/inline_img_001?msg=msg_cid")
+        assert resp.data == _IMAGE_BYTES
+
+    def test_cid_found_correct_content_type(self, client_cid):
+        """13.4 — GET /api/cid/<content_id> returns the correct Content-Type."""
+        resp = client_cid.get("/api/cid/inline_img_001?msg=msg_cid")
+        assert resp.content_type == "image/png"
+
+    # ------------------------------------------------------------------
+    # 13.5 — CID 404 for unknown content_id
+    # ------------------------------------------------------------------
+
+    def test_cid_404_for_unknown_content_id(self, client_cid):
+        """13.5 — GET /api/cid/<content_id> returns 404 when content_id is not in DB."""
+        resp = client_cid.get("/api/cid/nonexistent_cid_xyz")
+        assert resp.status_code == 404

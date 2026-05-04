@@ -9,6 +9,7 @@ from web.api.messages import messages_bp
 from web.api.labels import labels_bp
 from web.api.sync import sync_bp
 
+
 # ---------------------------------------------------------------------------
 # Application factory
 # ---------------------------------------------------------------------------
@@ -30,6 +31,14 @@ def create_app(db_path: str) -> Flask:
 
     # Create performance indexes on startup (safe no-op if they already exist)
     ensure_indexes(db_path)
+
+    # Ensure the workspace root (parent of the data directory) is on sys.path
+    # so that gmail_to_sqlite and related packages can be imported by request
+    # handlers without performing sys.path manipulation at request time.
+    data_dir = os.path.dirname(os.path.abspath(db_path))
+    workspace_root = os.path.dirname(data_dir)
+    if workspace_root not in sys.path:
+        sys.path.insert(0, workspace_root)
 
     # Warm the OS page cache in the background so the first request is fast.
     prewarm_db(db_path)

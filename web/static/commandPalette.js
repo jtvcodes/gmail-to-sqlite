@@ -2,7 +2,7 @@
 // Provides a keyboard-triggered overlay for searching and executing app actions.
 //
 // Depends on globals that may not exist in all contexts (runSync, themeManager,
-// sidebar, goToPage, toastManager) — all references are guarded with typeof checks.
+// sidebar, toastManager) — all references are guarded with typeof checks.
 
 const commandPalette = {
   /**
@@ -47,13 +47,6 @@ const commandPalette = {
         if (typeof sidebar !== "undefined" && typeof sidebar.toggle === "function") {
           sidebar.toggle();
         }
-      },
-    },
-    {
-      id: "goto-page",
-      label: "Go to page N",
-      run: (n) => {
-        if (typeof goToPage === "function") goToPage(n);
       },
     },
   ],
@@ -121,7 +114,7 @@ const commandPalette = {
     // Wire up input handler
     input.addEventListener("input", () => {
       this._focusedIndex = -1;
-      const filtered = this.filter(input.value);
+      const filtered = this.filter(input.value, this.ACTIONS);
       this._currentResults = filtered;
       this._renderResults(filtered, results);
     });
@@ -173,26 +166,12 @@ const commandPalette = {
    * @param {Array} [actions] - Optional action list (defaults to this.ACTIONS for testability).
    * @returns {Array} Matching actions (subset of the provided actions list).
    */
-  filter(query, actions) {
-    const list = actions !== undefined ? actions : this.ACTIONS;
+  filter(query, actions = this.ACTIONS) {
     const q = (query || "").toLowerCase();
 
-    const matched = q === ""
-      ? list.slice()
-      : list.filter((action) => action.label.toLowerCase().includes(q));
-
-    // If called with the live DOM present, also update the rendered results
-    if (actions === undefined) {
-      const container = document.getElementById("command-palette-container");
-      if (container) {
-        const results = container.querySelector(".cp-results");
-        if (results) {
-          this._renderResults(matched, results);
-        }
-      }
-    }
-
-    return matched;
+    return q === ""
+      ? actions.slice()
+      : actions.filter((action) => action.label.toLowerCase().includes(q));
   },
 
   /**

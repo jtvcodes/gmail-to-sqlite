@@ -75,7 +75,7 @@ _sort_date_lock = threading.Lock()
 # a sync completes.
 # ---------------------------------------------------------------------------
 COUNT_CACHE_TTL = 5  # seconds
-_count_cache: dict = {}
+_count_cache: dict[tuple, tuple[int, float]] = {}
 _count_cache_lock = threading.Lock()
 
 

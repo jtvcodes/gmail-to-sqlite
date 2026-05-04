@@ -350,35 +350,6 @@ function buildToggleButton(msg, iframe, bodyDiv) {
 }
 
 /**
- * Returns true for MIME types the browser can preview natively.
- */
-function isPreviewable(mimeType) {
-  if (!mimeType) return false;
-  if (mimeType.startsWith("image/")) return true;
-  const previewable = [
-    "application/pdf",
-    "text/plain",
-    "text/csv",
-    "text/html",
-  ];
-  return previewable.includes(mimeType);
-}
-
-/**
- * Returns an appropriate emoji icon for a given MIME type.
- */
-function attachmentIcon(mimeType) {
-  if (!mimeType) return "📎";
-  if (mimeType.startsWith("image/")) return "🖼️";
-  if (mimeType === "application/pdf") return "📄";
-  if (mimeType.startsWith("text/")) return "📝";
-  if (mimeType.includes("zip") || mimeType.includes("compressed")) return "🗜️";
-  if (mimeType.includes("spreadsheet") || mimeType === "text/csv") return "📊";
-  if (mimeType.includes("word") || mimeType.includes("document")) return "📝";
-  return "📎";
-}
-
-/**
  * Opens a modal overlay to preview a browser-compatible attachment.
  * Pass allAttachments (array) and currentIndex to enable prev/next navigation.
  * Falls back to single-attachment mode when allAttachments is omitted.

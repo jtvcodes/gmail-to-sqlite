@@ -3,7 +3,6 @@
 // Persists collapsed state to localStorage.
 //
 // Depends on the global `state` object defined in app.js.
-// Depends on `loadMessages` being available globally (defined in app.js).
 
 // ---------------------------------------------------------------------------
 // SVG icon library — inline, no external deps
@@ -171,8 +170,7 @@ const sidebar = {
         li.classList.toggle("sidebar-item--active", li.getAttribute("data-label") === labelName);
       });
     }
-    if (typeof loadMessages === "function") loadMessages();
-    else if (typeof state !== "undefined" && typeof state.onFilterChange === "function") state.onFilterChange();
+    if (typeof state !== "undefined" && typeof state.onFilterChange === "function") state.onFilterChange();
   },
 
   _setReadFilter(value) {

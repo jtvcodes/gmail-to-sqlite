@@ -2,7 +2,6 @@ import os
 import subprocess
 import sys
 import threading
-import time
 
 from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
 

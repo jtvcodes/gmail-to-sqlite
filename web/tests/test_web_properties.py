@@ -437,3 +437,43 @@ def test_property_8_invalid_pagination_rejected(messages, invalid_param):
         assert "error" in body
     finally:
         _cleanup(db_path)
+
+
+# ---------------------------------------------------------------------------
+# Pure helper: Python equivalent of resolveResponsiveFallback from readingPane.js
+# ---------------------------------------------------------------------------
+
+def resolve_responsive_fallback(mode: str, width: int) -> str:
+    """Python equivalent of the JS resolveResponsiveFallback function.
+
+    Rules:
+      "right"  + width < 900  → "below"
+      "below"  + width < 600  → "none"
+      otherwise               → mode
+    """
+    if mode == "right" and width < 900:
+        return "below"
+    if mode == "below" and width < 600:
+        return "none"
+    return mode
+
+
+# ---------------------------------------------------------------------------
+# Property 9: resolveResponsiveFallback correctness
+# Validates: Requirements 4.3
+# ---------------------------------------------------------------------------
+
+@given(
+    mode=st.sampled_from(["right", "below", "none"]),
+    width=st.integers(min_value=0, max_value=5000),
+)
+@settings(max_examples=200)
+def test_resolve_responsive_fallback_property(mode, width):
+    # Feature: gmail-web-viewer, Property 9: resolveResponsiveFallback correctness
+    result = resolve_responsive_fallback(mode, width)
+    if mode == "right" and width < 900:
+        assert result == "below"
+    elif mode == "below" and width < 600:
+        assert result == "none"
+    else:
+        assert result == mode

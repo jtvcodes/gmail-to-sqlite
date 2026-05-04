@@ -226,12 +226,12 @@ const readingPane = {
         const dataUrl = att.attachment_id
           ? "/api/messages/" + message.message_id + "/attachments/" + att.attachment_id + "/data"
           : "/api/messages/" + message.message_id + "/attachments/by-filename/" + encodeURIComponent(att.filename) + "/data";
-        const previewable = typeof isPreviewable === "function" && isPreviewable(att.mime_type);
+        const previewable = isPreviewable(att.mime_type);
 
         const chip = document.createElement("button");
         chip.className = "rp-attach-chip";
         chip.title = att.filename + (att.size ? " · " + Math.ceil(att.size / 1024) + " KB" : "");
-        chip.textContent = (typeof attachmentIcon === "function" ? attachmentIcon(att.mime_type) : "📎") + " " + att.filename;
+        chip.textContent = attachmentIcon(att.mime_type) + " " + att.filename;
 
         chip.addEventListener("click", function () {
           if (previewable && typeof openAttachmentPreview === "function") {
@@ -428,20 +428,4 @@ const readingPane = {
   resolveResponsiveFallback,
 };
 
-/**
- * Returns an appropriate emoji icon for a given MIME type.
- * (Local helper — not exported.)
- *
- * @param {string|undefined} mimeType
- * @returns {string}
- */
-function _attachmentIcon(mimeType) {
-  if (!mimeType) return "📎";
-  if (mimeType.startsWith("image/")) return "🖼️";
-  if (mimeType === "application/pdf") return "📄";
-  if (mimeType.startsWith("text/")) return "📝";
-  if (mimeType.includes("zip") || mimeType.includes("compressed")) return "🗜️";
-  if (mimeType.includes("spreadsheet") || mimeType === "text/csv") return "📊";
-  if (mimeType.includes("word") || mimeType.includes("document")) return "📝";
-  return "📎";
-}
+

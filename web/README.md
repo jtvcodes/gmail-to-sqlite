@@ -14,10 +14,14 @@ A Flask-based web application that provides a browser UI for reading Gmail messa
 - [Project Structure](#project-structure)
 - [REST API Reference](#rest-api-reference)
   - [GET /api/messages](#get-apimessages)
+  - [GET /api/messages/stats](#get-apimessagesstats)
   - [GET /api/messages/\<message\_id\>](#get-apimessagesmessage_id)
   - [GET /api/messages/\<message\_id\>/attachments/\<attachment\_id\>/data](#get-apimessagesmessage_idattachmentsattachment_iddata)
+  - [GET /api/messages/\<message\_id\>/attachments/by-filename/\<filename\>/data](#get-apimessagesmessage_idattachmentsby-filenamefilenamedata)
   - [GET /api/cid/\<content\_id\>](#get-apicidcontent_id)
   - [GET /api/labels](#get-apilabels)
+  - [GET /api/sync/status](#get-apisyncstatus)
+  - [GET /api/sync/stream](#get-apisyncstream)
   - [POST /api/sync](#post-apisync)
 - [Frontend Architecture](#frontend-architecture)
 - [Database Connection](#database-connection)
@@ -121,9 +125,16 @@ web/
 │   ├── index.html          # SPA shell
 │   ├── app.js              # State management and bootstrap
 │   ├── api.js              # Fetch wrappers for the REST API
+│   ├── attachments.js      # Shared attachment icon and previewability helpers
+│   ├── commandPalette.js   # Keyboard-triggered command palette overlay
 │   ├── filters.js          # Search input and label dropdown component
-│   ├── messageList.js      # Paginated message table component
 │   ├── messageDetail.js    # Message detail panel component
+│   ├── messageList.js      # Paginated message table component
+│   ├── paneResizer.js      # Drag-to-resize handler for the split pane
+│   ├── readingPane.js      # Reading pane rendering, mode switching, and responsive fallback
+│   ├── sidebar.js          # Sidebar navigation, label filtering, and read/unread filter
+│   ├── themeManager.js     # Theme (light/dark) and density (cozy/compact) manager
+│   ├── toastManager.js     # Toast notification manager
 │   └── style.css           # Application styles
 └── tests/
     ├── test_web_messages.py
@@ -188,6 +199,32 @@ Returns a paginated list of message summaries.
 | `400`  | Invalid `page`, `page_size`, or boolean param  |
 | `503`  | Database not yet populated (missing table)     |
 | `500`  | Unexpected database error                      |
+
+---
+
+### GET /api/messages/stats
+
+Returns aggregate counts for the message database.
+
+**Response**
+
+```json
+{
+  "total_messages": 1420,
+  "total_indexed": 1380,
+  "total_unsynced": 40
+}
+```
+
+| Field             | Type    | Description                                                    |
+|-------------------|---------|----------------------------------------------------------------|
+| `total_messages`  | integer | Total number of messages in the `messages` table               |
+| `total_indexed`   | integer | Number of messages present in the `gmail_index` table          |
+| `total_unsynced`  | integer | `total_messages − total_indexed` (messages not yet indexed)    |
+
+**Error Conditions**
+
+If the `messages` table does not exist, all three fields return `0` (no `500`). If the `gmail_index` table does not exist, `total_indexed` equals `total_messages` and `total_unsynced` is `0`.
 
 ---
 
@@ -256,6 +293,26 @@ Fetched attachments are cached to disk automatically for subsequent requests.
 
 ---
 
+### GET /api/messages/\<message_id\>/attachments/by-filename/\<filename\>/data
+
+Serves the raw bytes of an attachment looked up by filename rather than attachment ID. Useful when the attachment ID is not known but the filename is.
+
+**Resolution order:**
+
+1. Disk cache at `data/attachments/<message_id>/<filename>`
+2. `data` column in the `attachments` table (legacy inline storage)
+3. On-demand fetch from the Gmail API (requires valid `credentials.json`)
+
+**Error Responses**
+
+| Status | Condition                                  |
+|--------|--------------------------------------------|
+| `404`  | No attachment with that filename found     |
+| `502`  | Gmail API fetch failed                     |
+| `500`  | Unexpected error                           |
+
+---
+
 ### GET /api/cid/\<content_id\>
 
 Resolves a `cid:` inline image reference used in HTML email bodies.
@@ -279,6 +336,61 @@ Returns a sorted list of all distinct labels present on non-deleted messages.
 ```json
 ["INBOX", "SENT", "STARRED", "UNREAD", "work"]
 ```
+
+---
+
+### GET /api/sync/status
+
+Returns the current state of the background sync session.
+
+**Response (no sync running)**
+
+```json
+{ "running": false }
+```
+
+**Response (sync in progress)**
+
+```json
+{ "running": true, "mode": "delta" }
+```
+
+| Field    | Type    | Description                                                        |
+|----------|---------|--------------------------------------------------------------------|
+| `running`| boolean | `true` if a sync session is currently active, `false` otherwise    |
+| `mode`   | string  | Present only when `running` is `true`; one of `delta`, `force`, `missing` |
+
+---
+
+### GET /api/sync/stream
+
+Server-Sent Events (SSE) endpoint that streams live output from a running sync session.
+
+**Query Parameters**
+
+| Parameter | Type    | Description                                                    |
+|-----------|---------|----------------------------------------------------------------|
+| `mode`    | string  | Sync mode: `delta`, `force`, or `missing`                      |
+| `from`    | integer | Resume from this line index (for reconnection after disconnect) |
+| `workers` | integer | Number of parallel worker threads for the sync process         |
+
+**SSE Event Format**
+
+Each line of sync output is sent as:
+
+```
+data: <line>
+id: <line_index>
+```
+
+When the sync process finishes, a final event is emitted:
+
+```
+event: done
+data: <exit_code>
+```
+
+The connection is kept open until the sync process exits or the client disconnects.
 
 ---
 
@@ -313,9 +425,16 @@ The SPA is built with vanilla JavaScript — no framework or build step required
 |--------------------|--------------------------------------------------------------------------------|
 | `app.js`           | Global `state` object, loading overlay, error banner, bootstrap on `DOMContentLoaded` |
 | `api.js`           | Thin `fetch` wrappers (`fetchMessages`, `fetchMessage`, `fetchLabels`); exports `api` object |
+| `attachments.js`   | Shared `attachmentIcon` and `isPreviewable` helpers used by multiple components |
+| `commandPalette.js`| Keyboard-triggered command palette overlay (opened with a keyboard shortcut)   |
 | `filters.js`       | Renders the search input and label `<select>` into `#filter-bar`; exports `filters` |
 | `messageList.js`   | Renders the sortable, paginated message table into `#message-list`; exports `messageList` |
 | `messageDetail.js` | Renders the detail panel into `#message-detail`, handles HTML/text toggle and attachment preview; exports `messageDetail` |
+| `paneResizer.js`   | Drag-to-resize handler for the split pane between the message list and detail  |
+| `readingPane.js`   | Reading pane rendering, mode switching (right/below/none), and responsive fallback |
+| `sidebar.js`       | Sidebar navigation, label filtering, and read/unread filter                    |
+| `themeManager.js`  | Theme (light/dark) and density (cozy/compact) manager; persists preference to `localStorage` |
+| `toastManager.js`  | Toast notification manager for transient status messages                       |
 
 ### State Object (`app.js`)
 
@@ -383,17 +502,22 @@ pytest web/tests/test_web_properties.py
 
 Test files:
 
-| File                                    | What it covers                                      |
-|-----------------------------------------|-----------------------------------------------------|
-| `test_web_messages.py`                  | Message list and detail endpoint behaviour          |
-| `test_web_labels.py`                    | Labels endpoint                                     |
-| `test_web_properties.py`                | Property-based tests for the messages API           |
-| `test_message_html_view.py`             | HTML/text body rendering logic                      |
-| `test_message_html_view_properties.py`  | Property-based tests for body rendering             |
-| `test_raw_body_storage_web_properties.py` | Raw body storage round-trip properties            |
-| `test_preservation_properties.py`       | Data preservation invariants                        |
-| `test_recipient_formatting.py`          | Recipient object formatting                         |
-| `test_bug_condition.py`                 | Regression / bug condition tests                    |
+| File                                        | What it covers                                                  |
+|---------------------------------------------|-----------------------------------------------------------------|
+| `test_web_messages.py`                      | Message list and detail endpoint behaviour                      |
+| `test_web_labels.py`                        | Labels endpoint                                                 |
+| `test_web_properties.py`                    | Property-based tests for the messages API                       |
+| `test_web_sync.py`                          | `GET /api/sync/status` endpoint behaviour                       |
+| `test_sync_properties.py`                   | Property-based tests for the sync API (mode routing, output)    |
+| `test_sync_frontend_properties.test.js`     | Frontend property-based tests for the sync button and dropdown  |
+| `test_message_html_view.py`                 | HTML/text body rendering logic                                  |
+| `test_message_html_view_properties.py`      | Property-based tests for body rendering                         |
+| `test_messageDetail.test.js`                | Frontend tests for the message detail panel component           |
+| `test_messageList.test.js`                  | Frontend property-based tests for the message list display date |
+| `test_raw_body_storage_web_properties.py`   | Raw body storage round-trip properties                          |
+| `test_preservation_properties.py`           | Data preservation invariants                                    |
+| `test_recipient_formatting.py`              | Recipient object formatting                                     |
+| `test_bug_condition.py`                     | Regression / bug condition tests                                |
 
 ---
 

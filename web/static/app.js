@@ -216,6 +216,96 @@ function labelForMode(mode) {
   return "Syncing missing messages…";
 }
 
+// ---------------------------------------------------------------------------
+// Shared scroll-lock helper — used by both runSync and _reconnectToSync
+// ---------------------------------------------------------------------------
+
+function _createScrollLock(liveOutput, scrollBtn, liveWrap) {
+  let autoScroll = true;
+  let programmaticScroll = false;
+  let scrollPending = false;
+
+  function isAtBottom() {
+    if (!liveOutput) return true;
+    return liveOutput.scrollHeight - liveOutput.scrollTop - liveOutput.clientHeight < 4;
+  }
+  function setScrollBtn(visible) {
+    if (!scrollBtn) return;
+    if (visible) scrollBtn.removeAttribute("hidden");
+    else scrollBtn.setAttribute("hidden", "");
+  }
+  function onScroll() {
+    if (programmaticScroll) return;
+    if (isAtBottom()) { autoScroll = true; setScrollBtn(false); }
+    else { autoScroll = false; setScrollBtn(true); }
+  }
+  function resumeScroll() {
+    autoScroll = true;
+    setScrollBtn(false);
+    if (liveOutput) {
+      programmaticScroll = true;
+      liveOutput.scrollTop = liveOutput.scrollHeight;
+      requestAnimationFrame(() => { programmaticScroll = false; });
+    }
+  }
+  function scheduleScroll() {
+    if (!autoScroll || scrollPending || !liveOutput) return;
+    scrollPending = true;
+    requestAnimationFrame(() => {
+      programmaticScroll = true;
+      liveOutput.scrollTop = liveOutput.scrollHeight;
+      scrollPending = false;
+      requestAnimationFrame(() => { programmaticScroll = false; });
+    });
+  }
+
+  if (liveOutput) liveOutput.addEventListener("scroll", onScroll);
+  if (scrollBtn) scrollBtn.addEventListener("click", resumeScroll);
+
+  function cleanup() {
+    if (liveOutput) liveOutput.removeEventListener("scroll", onScroll);
+    if (scrollBtn) scrollBtn.removeEventListener("click", resumeScroll);
+    setScrollBtn(false);
+    if (liveWrap) liveWrap.style.display = "none";
+  }
+
+  return { isAtBottom, setScrollBtn, onScroll, resumeScroll, scheduleScroll, cleanup };
+}
+
+// ---------------------------------------------------------------------------
+// Shared SSE connection helper — used by both runSync and _reconnectToSync
+// ---------------------------------------------------------------------------
+
+// Returns a Promise resolving with { outcome, exitCode, lastLine }
+function _connectToSyncStream(url, liveOutput, scheduleScroll, summaryLines, onProgress) {
+  return new Promise((resolve) => {
+    const es = new EventSource(url);
+    let lastLine = parseInt(new URL(url, location.href).searchParams.get("from") || "0", 10);
+
+    es.onmessage = function (event) {
+      if (liveOutput) {
+        liveOutput.appendChild(document.createTextNode(event.data + "\n"));
+        scheduleScroll();
+      }
+      summaryLines.push(event.data);
+      if (event.lastEventId) lastLine = parseInt(event.lastEventId) + 1;
+      if (onProgress) onProgress(event.data);
+    };
+    es.addEventListener("done", function (event) {
+      es.close();
+      resolve({ outcome: "done", exitCode: parseInt(event.data, 10), lastLine });
+    });
+    es.addEventListener("error", function (event) {
+      es.close();
+      resolve({ outcome: "error", msg: event.data || "Sync process failed", lastLine });
+    });
+    es.onerror = function () {
+      es.close();
+      resolve({ outcome: "connection_lost", lastLine });
+    };
+  });
+}
+
 async function runSync(mode) {
   closeSyncDropdown();
 
@@ -254,52 +344,7 @@ async function runSync(mode) {
   saveSyncState(mode, true);
 
   // --- Scroll-lock logic (used if user opens the overlay) ---
-  let autoScroll = true;
-  let programmaticScroll = false;
-  let scrollPending = false;
-
-  function isAtBottom() {
-    if (!liveOutput) return true;
-    return liveOutput.scrollHeight - liveOutput.scrollTop - liveOutput.clientHeight < 4;
-  }
-  function setScrollBtn(visible) {
-    if (!scrollBtn) return;
-    if (visible) scrollBtn.removeAttribute("hidden");
-    else scrollBtn.setAttribute("hidden", "");
-  }
-  function onScroll() {
-    if (programmaticScroll) return;
-    if (isAtBottom()) { autoScroll = true; setScrollBtn(false); }
-    else { autoScroll = false; setScrollBtn(true); }
-  }
-  function resumeScroll() {
-    autoScroll = true;
-    setScrollBtn(false);
-    if (liveOutput) {
-      programmaticScroll = true;
-      liveOutput.scrollTop = liveOutput.scrollHeight;
-      requestAnimationFrame(() => { programmaticScroll = false; });
-    }
-  }
-  function scheduleScroll() {
-    if (!autoScroll || scrollPending || !liveOutput) return;
-    scrollPending = true;
-    requestAnimationFrame(() => {
-      programmaticScroll = true;
-      liveOutput.scrollTop = liveOutput.scrollHeight;
-      scrollPending = false;
-      requestAnimationFrame(() => { programmaticScroll = false; });
-    });
-  }
-  if (liveOutput) liveOutput.addEventListener("scroll", onScroll);
-  if (scrollBtn) scrollBtn.addEventListener("click", resumeScroll);
-
-  function cleanup() {
-    if (liveOutput) liveOutput.removeEventListener("scroll", onScroll);
-    if (scrollBtn) scrollBtn.removeEventListener("click", resumeScroll);
-    setScrollBtn(false);
-    if (liveWrap) liveWrap.style.display = "none";
-  }
+  const { scheduleScroll, cleanup } = _createScrollLock(liveOutput, scrollBtn, liveWrap);
 
   const summaryLines = [];
   let syncTotal = 0;
@@ -314,47 +359,19 @@ async function runSync(mode) {
     if (lbl) lbl.textContent = label;
   }
 
-  // --- Single SSE attempt ---
-  function attemptSync(attemptLabel, fromLine) {
-    return new Promise((resolve) => {
-      if (attemptLabel && liveOutput) {
-        liveOutput.appendChild(document.createTextNode(`\n--- ${attemptLabel} ---\n`));
-      }
-      const url = `/api/sync/stream?mode=${encodeURIComponent(mode)}&workers=20&from=${fromLine || 0}`;
-      const es = new EventSource(url);
-      let lastLine = fromLine || 0;
-
-      es.onmessage = function (event) {
-        if (liveOutput) {
-          liveOutput.appendChild(document.createTextNode(event.data + "\n"));
-          scheduleScroll();
-        }
-        summaryLines.push(event.data);
-        if (event.lastEventId) lastLine = parseInt(event.lastEventId) + 1;
-
-        const foundMatch = event.data.match(/Found (\d+) messages? to sync\./);
-        if (foundMatch) { syncTotal = parseInt(foundMatch[1], 10); syncDone = 0; updateProgressLabel(); }
-        if (syncTotal > 0 && /Successfully synced message/.test(event.data)) {
-          syncDone += 1; updateProgressLabel();
-        }
-      };
-      es.addEventListener("done", function (event) {
-        es.close();
-        resolve({ outcome: "done", exitCode: parseInt(event.data, 10), lastLine });
-      });
-      es.addEventListener("error", function (event) {
-        es.close();
-        resolve({ outcome: "error", msg: event.data || "Sync process failed", lastLine });
-      });
-      es.onerror = function () {
-        es.close();
-        resolve({ outcome: "connection_lost", lastLine });
-      };
-    });
+  function _onProgress(line) {
+    const foundMatch = line.match(/Found (\d+) messages? to sync\./);
+    if (foundMatch) { syncTotal = parseInt(foundMatch[1], 10); syncDone = 0; updateProgressLabel(); }
+    if (syncTotal > 0 && /Successfully synced message/.test(line)) {
+      syncDone += 1; updateProgressLabel();
+    }
   }
 
   // --- Run with one automatic retry ---
-  let result = await attemptSync(null, 0);
+  let result = await _connectToSyncStream(
+    `/api/sync/stream?mode=${encodeURIComponent(mode)}&workers=20&from=0`,
+    liveOutput, scheduleScroll, summaryLines, _onProgress
+  );
 
   const isFailure = result.outcome === "connection_lost" ||
                     result.outcome === "error" ||
@@ -368,7 +385,11 @@ async function runSync(mode) {
     if (liveOutput) liveOutput.appendChild(document.createTextNode(`\n⚠ ${retryMsg}\n`));
     await new Promise(r => setTimeout(r, 2000));
     syncTotal = 0; syncDone = 0;
-    result = await attemptSync("Retry attempt", result.lastLine || 0);
+    if (liveOutput) liveOutput.appendChild(document.createTextNode(`\n--- Retry attempt ---\n`));
+    result = await _connectToSyncStream(
+      `/api/sync/stream?mode=${encodeURIComponent(mode)}&workers=20&from=${result.lastLine || 0}`,
+      liveOutput, scheduleScroll, summaryLines, _onProgress
+    );
   }
 
   // --- Finalize ---
@@ -646,53 +667,7 @@ async function _reconnectToSync(mode) {
   if (minimizeBtn) minimizeBtn.removeAttribute("hidden");
 
   // --- Scroll-lock logic (same as runSync) ---
-  let autoScroll = true;
-  let programmaticScroll = false;
-  let scrollPending = false;
-
-  function isAtBottom() {
-    if (!liveOutput) return true;
-    return liveOutput.scrollHeight - liveOutput.scrollTop - liveOutput.clientHeight < 4;
-  }
-  function setScrollBtn(visible) {
-    if (!scrollBtn) return;
-    if (visible) scrollBtn.removeAttribute("hidden");
-    else scrollBtn.setAttribute("hidden", "");
-  }
-  function onScroll() {
-    if (programmaticScroll) return;
-    if (isAtBottom()) { autoScroll = true; setScrollBtn(false); }
-    else { autoScroll = false; setScrollBtn(true); }
-  }
-  function resumeScroll() {
-    autoScroll = true;
-    setScrollBtn(false);
-    if (liveOutput) {
-      programmaticScroll = true;
-      liveOutput.scrollTop = liveOutput.scrollHeight;
-      requestAnimationFrame(() => { programmaticScroll = false; });
-    }
-  }
-  function scheduleScroll() {
-    if (!autoScroll || scrollPending || !liveOutput) return;
-    scrollPending = true;
-    requestAnimationFrame(() => {
-      programmaticScroll = true;
-      liveOutput.scrollTop = liveOutput.scrollHeight;
-      scrollPending = false;
-      requestAnimationFrame(() => { programmaticScroll = false; });
-    });
-  }
-
-  if (liveOutput) liveOutput.addEventListener("scroll", onScroll);
-  if (scrollBtn) scrollBtn.addEventListener("click", resumeScroll);
-
-  function cleanup() {
-    if (liveOutput) liveOutput.removeEventListener("scroll", onScroll);
-    if (scrollBtn) scrollBtn.removeEventListener("click", resumeScroll);
-    setScrollBtn(false);
-    if (liveWrap) liveWrap.style.display = "none";
-  }
+  const { scheduleScroll, cleanup } = _createScrollLock(liveOutput, scrollBtn, liveWrap);
 
   // Plug into the existing stream from line 0 (replay full log)
   const summaryLines = [];
@@ -706,45 +681,34 @@ async function _reconnectToSync(mode) {
   }
 
   const url = `/api/sync/stream?mode=${encodeURIComponent(mode)}&workers=20&from=0`;
-  const es = new EventSource(url);
 
-  es.onmessage = function (event) {
-    if (liveOutput) {
-      liveOutput.appendChild(document.createTextNode(event.data + "\n"));
-      scheduleScroll();
-    }
-    summaryLines.push(event.data);
-    const foundMatch = event.data.match(/Found (\d+) messages? to sync\./);
+  const result = await _connectToSyncStream(url, liveOutput, scheduleScroll, summaryLines, function (line) {
+    const foundMatch = line.match(/Found (\d+) messages? to sync\./);
     if (foundMatch) { syncTotal = parseInt(foundMatch[1], 10); syncDone = 0; updateProgressLabel(); }
-    if (syncTotal > 0 && /Successfully synced message/.test(event.data)) {
+    if (syncTotal > 0 && /Successfully synced message/.test(line)) {
       syncDone += 1; updateProgressLabel();
     }
-  };
-
-  es.addEventListener("done", function (event) {
-    es.close();
-    cleanup();
-    if (outputText) outputText.textContent = summaryLines.join("\n");
-    const exitCode = parseInt(event.data, 10);
-    if (exitCode === 0) {
-      if (outputPanel && outputText && outputText.textContent.trim()) {
-        outputPanel.removeAttribute("hidden");
-        outputPanel.open = false;
-      }
-      loadLabels().then(() => loadMessages()).then(() => loadStats());
-    } else {
-      if (outputPanel) { outputPanel.removeAttribute("hidden"); outputPanel.open = true; }
-      state.error = "Sync finished with errors (see output below)";
-      renderError();
-    }
-    delete overlay.dataset.minimized;
-    clearSyncState();
-    setSyncActive(false);
-    setLoading(false);
   });
 
-  es.addEventListener("error", function () { es.close(); cleanup(); setSyncActive(false); });
-  es.onerror = function () { es.close(); cleanup(); setSyncActive(false); };
+  cleanup();
+  if (outputText) outputText.textContent = summaryLines.join("\n");
+
+  if (result.outcome === "done" && result.exitCode === 0) {
+    if (outputPanel && outputText && outputText.textContent.trim()) {
+      outputPanel.removeAttribute("hidden");
+      outputPanel.open = false;
+    }
+    loadLabels().then(() => loadMessages()).then(() => loadStats());
+  } else if (result.outcome === "done") {
+    if (outputPanel) { outputPanel.removeAttribute("hidden"); outputPanel.open = true; }
+    state.error = "Sync finished with errors (see output below)";
+    renderError();
+  }
+  // connection_lost / error outcomes: just clean up silently
+  delete overlay.dataset.minimized;
+  clearSyncState();
+  setSyncActive(false);
+  setLoading(false);
 }
 
 // ---------------------------------------------------------------------------
