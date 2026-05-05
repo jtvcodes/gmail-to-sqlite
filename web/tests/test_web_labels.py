@@ -20,7 +20,6 @@ CREATE TABLE messages (
     subject       TEXT,
     body          TEXT,
     raw           TEXT,
-    received_date DATETIME,
     size          INTEGER,
     timestamp     DATETIME,
     is_read       INTEGER,
@@ -72,7 +71,7 @@ def _seed_db(path: str) -> None:
     conn = sqlite3.connect(path)
     conn.execute(CREATE_TABLE_SQL)
     conn.executemany(
-        "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, subject, body, raw, received_date, size, timestamp, is_read, is_outgoing, is_deleted, last_indexed) "
+        "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, subject, body, raw, size, timestamp, is_read, is_outgoing, is_deleted, last_indexed) "
         "VALUES (?,?,?,?,?,?,?,NULL,NULL,?,?,?,?,?,NULL)",
         SEED_ROWS,
     )
@@ -170,7 +169,7 @@ class TestGetLabels:
         conn = sqlite3.connect(path)
         conn.execute(CREATE_TABLE_SQL)
         conn.execute(
-            "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, subject, body, raw, received_date, size, timestamp, is_read, is_outgoing, is_deleted, last_indexed) "
+            "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, subject, body, raw, size, timestamp, is_read, is_outgoing, is_deleted, last_indexed) "
             "VALUES (?,?,?,?,?,?,?,NULL,NULL,?,?,?,?,?,NULL)",
             ("m1", "t1", "{}", "{}", '["INBOX"]', "s", "b", 1, "2024-01-01", 0, 0, 1),
         )

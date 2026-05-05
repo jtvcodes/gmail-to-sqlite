@@ -111,11 +111,8 @@ function render() {
   }
 
   const dateLine = document.createElement("div");
-  if (msg.received_date != null) {
-    dateLine.textContent = "Received: " + new Date(msg.received_date).toLocaleString();
-  } else {
-    dateLine.textContent = "Date: " + (msg.timestamp ? new Date(msg.timestamp).toLocaleString() : "");
-  }
+  dateLine.textContent = "Date: " + (msg.timestamp ? new Date(msg.timestamp).toLocaleString() : "");
+
   meta.appendChild(dateLine);
 
   const idLine = document.createElement("div");
@@ -282,26 +279,24 @@ function renderBody(iframe, msg, view) {
 
   const doc = iframe.contentDocument || iframe.contentWindow.document;
   doc.open();
-  doc.write(`<!DOCTYPE html><html><head><meta charset="UTF-8">
+
+  // If body_html is already a full HTML document, write it directly.
+  // Otherwise wrap it in a minimal shell with base styles.
+  const isFullDoc = /^\s*<!DOCTYPE\s/i.test(htmlContent) || /^\s*<html[\s>]/i.test(htmlContent);
+  if (isFullDoc) {
+    doc.write(htmlContent);
+  } else {
+    doc.write(`<!DOCTYPE html><html><head><meta charset="UTF-8">
     <meta name="referrer" content="no-referrer">
     <style>
-      body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 14px; color: #333; }
+      body { margin: 0; padding: 8px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 14px; color: #333; }
       a { color: #1a73e8; }
       img { max-width: 100%; }
     </style>
   </head><body>${htmlContent}</body></html>`);
-  doc.close();
+  }
 
-  // Auto-resize iframe to content height
-  iframe.addEventListener("load", function () {
-    iframe.style.height = iframe.contentDocument.body.scrollHeight + "px";
-  });
-  // Fallback resize after a short delay
-  setTimeout(function () {
-    if (iframe.contentDocument) {
-      iframe.style.height = iframe.contentDocument.body.scrollHeight + "px";
-    }
-  }, 100);
+  doc.close();
 }
 
 /**

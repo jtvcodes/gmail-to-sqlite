@@ -5,7 +5,7 @@
  * Each property runs a minimum of 100 iterations.
  *
  * Properties tested:
- *   Property 15: Display date uses received_date when available (Req 12.1, 12.2)
+ *   Property 15: Display date always uses timestamp (Req 12.1)
  */
 
 "use strict";
@@ -22,108 +22,78 @@ const fc = require("fast-check");
 // ---------------------------------------------------------------------------
 
 /**
- * Returns the best available display date for a message.
- * Prefers received_date; falls back to timestamp.
+ * Returns the display date for a message — always uses timestamp.
  *
  * Faithful copy of getDisplayDate() from web/static/messageList.js
  */
 function getDisplayDate(msg) {
-  return msg.received_date || msg.timestamp;
+  return msg.timestamp;
 }
 
 // ---------------------------------------------------------------------------
-// Property 15: Display date uses received_date when available
-// Validates: Requirements 12.1, 12.2
+// Property 15: Display date always uses timestamp
+// Validates: Requirement 12.1
 // ---------------------------------------------------------------------------
 
-describe("Property 15: Display date uses received_date when available", () => {
+describe("Property 15: Display date always uses timestamp", () => {
   /**
-   * **Validates: Requirements 12.1, 12.2**
+   * **Validates: Requirement 12.1**
    *
-   * For any message object where received_date is non-null, getDisplayDate(msg)
-   * SHALL return received_date. For any message object where received_date is
-   * null or undefined, getDisplayDate(msg) SHALL return timestamp.
+   * For any message object, getDisplayDate(msg) SHALL return msg.timestamp.
    */
-  test("test_display_date_prefers_received_date: returns received_date when non-null, falls back to timestamp otherwise", () => {
+  test("test_display_date_uses_timestamp: always returns timestamp", () => {
     fc.assert(
       fc.property(
-        // received_date: either null/undefined (absent) or a non-empty string
-        fc.option(fc.string({ minLength: 1 }), { nil: null }),
-        // timestamp: always a non-empty string (required fallback)
         fc.string({ minLength: 1 }),
-        (received_date, timestamp) => {
-          const msg = { received_date, timestamp };
-          const result = getDisplayDate(msg);
-
-          if (received_date !== null && received_date !== undefined) {
-            // When received_date is present, it must be returned
-            expect(result).toBe(received_date);
-          } else {
-            // When received_date is absent, timestamp must be returned
-            expect(result).toBe(timestamp);
-          }
+        (timestamp) => {
+          const msg = { timestamp };
+          expect(getDisplayDate(msg)).toBe(timestamp);
         }
       ),
       { numRuns: 200 }
     );
   });
 
-  test("test_display_date_prefers_received_date: undefined received_date falls back to timestamp", () => {
+  test("test_display_date_uses_timestamp: ignores any other date fields", () => {
     fc.assert(
       fc.property(
-        // timestamp: always a non-empty string
         fc.string({ minLength: 1 }),
-        (timestamp) => {
-          // msg with no received_date property at all (undefined)
-          const msg = { timestamp };
-          const result = getDisplayDate(msg);
-          expect(result).toBe(timestamp);
+        fc.string({ minLength: 1 }),
+        (timestamp, otherDate) => {
+          const msg = { timestamp, received_date: otherDate };
+          expect(getDisplayDate(msg)).toBe(timestamp);
         }
       ),
-      { numRuns: 100 }
+      { numRuns: 200 }
     );
   });
 });
 
 // ---------------------------------------------------------------------------
-// Unit tests for messageList.js — received_date / timestamp fallback
-// Validates: Requirements 12.1, 12.2
+// Unit tests for messageList.js — timestamp display
+// Validates: Requirement 12.1
 // ---------------------------------------------------------------------------
 
 describe("Unit tests: message list display date", () => {
   /**
-   * **Validates: Requirements 12.1**
+   * **Validates: Requirement 12.1**
    *
-   * When received_date is non-null, getDisplayDate returns received_date.
+   * getDisplayDate always returns timestamp.
    */
-  test("message list uses received_date when non-null", () => {
-    const received = "2024-03-20T14:00:00Z";
-    const timestamp = "2024-03-18T09:00:00Z";
-    const msg = { received_date: received, timestamp };
-    expect(getDisplayDate(msg)).toBe(received);
-  });
-
-  /**
-   * **Validates: Requirements 12.2**
-   *
-   * When received_date is null, getDisplayDate falls back to timestamp.
-   */
-  test("message list falls back to timestamp when received_date is null", () => {
-    const timestamp = "2024-03-18T09:00:00Z";
-    const msg = { received_date: null, timestamp };
-    expect(getDisplayDate(msg)).toBe(timestamp);
-  });
-
-  test("message list falls back to timestamp when received_date is undefined", () => {
+  test("message list uses timestamp", () => {
     const timestamp = "2024-03-18T09:00:00Z";
     const msg = { timestamp };
     expect(getDisplayDate(msg)).toBe(timestamp);
   });
 
-  test("message list falls back to timestamp when received_date is empty string", () => {
+  test("message list uses timestamp even when other date fields are present", () => {
     const timestamp = "2024-03-18T09:00:00Z";
-    const msg = { received_date: "", timestamp };
-    // Empty string is falsy, so falls back to timestamp
+    const msg = { timestamp, received_date: "2024-03-20T14:00:00Z" };
     expect(getDisplayDate(msg)).toBe(timestamp);
+  });
+
+  test("message list returns undefined when timestamp is absent", () => {
+    const msg = {};
+    expect(getDisplayDate(msg)).toBeUndefined();
   });
 });

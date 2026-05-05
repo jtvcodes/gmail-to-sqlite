@@ -5,16 +5,14 @@ import threading
 
 from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
 
-from web.db import ensure_indexes, invalidate_count_cache
-
 sync_bp = Blueprint("sync", __name__)
 
-_VALID_MODES = {"delta", "force", "missing", "test"}
+_VALID_MODES = {"new", "delta", "force", "test"}
 
 
 # ---------------------------------------------------------------------------
-# Server-side sync session — keeps the subprocess alive independently of any
-# SSE connection.  New connections replay the buffered log then tail live.
+# Sync session — keeps the subprocess alive independently of any SSE
+# connection. New connections replay the buffered log then tail live.
 # ---------------------------------------------------------------------------
 
 class SyncSession:
@@ -22,8 +20,8 @@ class SyncSession:
 
     def __init__(self, mode: str, cmd: list, cwd: str, env: dict):
         self.mode = mode
-        self.lines: list[str] = []          # full output buffer
-        self.exit_code: int | None = None   # None while running
+        self.lines: list[str] = []
+        self.exit_code: int | None = None
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
         self._proc: subprocess.Popen | None = None
@@ -58,16 +56,6 @@ class SyncSession:
             with self._cond:
                 self.exit_code = rc
                 self._cond.notify_all()
-            # Invalidate the count cache and rebuild indexes so the UI
-            # shows fresh totals immediately after sync completes.
-            try:
-                from flask import current_app
-                db_path = current_app.config.get("DB_PATH", "")
-                if db_path:
-                    ensure_indexes(db_path)
-            except RuntimeError:
-                pass  # No app context outside a request — safe to skip
-            invalidate_count_cache()
 
     @property
     def running(self) -> bool:
@@ -78,19 +66,16 @@ class SyncSession:
             self._proc.kill()
 
     def tail(self, from_line: int = 0):
-        """Generator: yields (line_index, line) starting from from_line, then
-        blocks until new lines arrive or the process finishes."""
+        """Yield (line_index, line) starting from from_line, blocking until
+        new lines arrive or the process finishes."""
         idx = from_line
         while True:
             with self._cond:
-                # Yield any buffered lines we haven't sent yet
                 while idx < len(self.lines):
                     yield idx, self.lines[idx]
                     idx += 1
-                # If process finished and we've sent everything, stop
                 if self.exit_code is not None and idx >= len(self.lines):
                     return
-                # Wait for more output
                 self._cond.wait(timeout=1.0)
 
 
@@ -104,34 +89,32 @@ def get_or_start_session(mode: str, cmd: list, cwd: str, env: dict) -> SyncSessi
     global _session
     with _session_lock:
         if _session is not None and _session.running and _session.mode == mode:
-            return _session          # reuse existing session
+            return _session
         if _session is not None:
-            _session.kill()          # kill stale session
+            _session.kill()
         _session = SyncSession(mode, cmd, cwd, env)
         return _session
-
-
-def get_active_session(mode: str) -> SyncSession | None:
-    """Return the active session for mode if one is running, else None."""
-    with _session_lock:
-        if _session is not None and _session.mode == mode:
-            return _session
-        return None
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _build_cmd(mode: str, main_py: str, data_dir: str, workers: int = 20) -> list:
-    if mode == "delta":
-        return [sys.executable, main_py, "sync", "--delta", "--data-dir", data_dir, "--workers", str(workers)]
+def _build_cmd(mode: str, main_py: str, data_dir: str, workers: int = 20, test_limit: int = 10000) -> list:
+    base = [sys.executable, main_py, "sync", "--data-dir", data_dir, "--workers", str(workers)]
+    if mode == "new":
+        # Fetch only messages newer than the last synced timestamp
+        return base + ["--delta"]
+    elif mode == "delta":
+        # All missing messages + updates on existing (default full sync via history API)
+        return base
     elif mode == "force":
-        return [sys.executable, main_py, "sync", "--force", "--data-dir", data_dir, "--workers", str(workers)]
+        # Re-download and replace everything
+        return base + ["--force"]
     elif mode == "test":
-        return [sys.executable, main_py, "sync", "--test", "10000", "--data-dir", data_dir, "--workers", str(workers)]
-    else:  # "missing"
-        return [sys.executable, main_py, "sync", "--data-dir", data_dir, "--workers", str(workers)]
+        # Force re-download of a limited number of messages
+        return base + ["--force", "--test", str(test_limit)]
+    return base
 
 
 def _resolve_paths(db_path: str):
@@ -143,21 +126,30 @@ def _resolve_paths(db_path: str):
 
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# POST /api/sync/stop
 # ---------------------------------------------------------------------------
+
+@sync_bp.route("/sync/stop", methods=["POST"])
+def stop_sync():
+    """Kill the running sync process if one is active."""
+    with _session_lock:
+        if _session is not None and _session.running:
+            _session.kill()
+            return jsonify({"ok": True, "message": "Sync process stopped."})
+    return jsonify({"ok": False, "message": "No sync is currently running."})
 
 @sync_bp.route("/sync/status")
 def sync_status():
-    """GET /api/sync/status — returns whether a sync is currently running."""
+    """Return whether a sync is currently running."""
     with _session_lock:
         if _session is not None and _session.running:
-            # Scan buffered lines for latest progress
             progress_label = None
             sync_total = 0
             sync_done = 0
             with _session._lock:
                 for line in _session.lines:
-                    m = __import__("re").search(r"Found (\d+) messages? to sync\.", line)
+                    import re
+                    m = re.search(r"Found (\d+) messages? to sync\.", line)
                     if m:
                         sync_total = int(m.group(1))
                         sync_done = 0
@@ -173,9 +165,13 @@ def sync_status():
     return jsonify({"running": False})
 
 
+# ---------------------------------------------------------------------------
+# POST /api/sync
+# ---------------------------------------------------------------------------
+
 @sync_bp.route("/sync", methods=["POST"])
 def run_sync():
-    """POST /api/sync — legacy non-streaming endpoint."""
+    """Non-streaming sync — runs to completion and returns output."""
     body = request.get_json(silent=True, force=True) or {}
     mode = body.get("mode", "missing")
 
@@ -189,39 +185,54 @@ def run_sync():
     except (ValueError, TypeError):
         return jsonify({"error": "'workers' must be an integer"}), 400
 
+    try:
+        test_limit = int(body.get("test_limit", 10000))
+        if test_limit < 1:
+            return jsonify({"error": "'test_limit' must be >= 1"}), 400
+    except (ValueError, TypeError):
+        return jsonify({"error": "'test_limit' must be an integer"}), 400
+
     db_path = current_app.config["DB_PATH"]
     main_py, data_dir, workspace_root = _resolve_paths(db_path)
 
     if not os.path.isfile(main_py):
         return jsonify({"error": f"main.py not found at {main_py}"}), 500
 
-    cmd = _build_cmd(mode, main_py, data_dir, workers)
+    cmd = _build_cmd(mode, main_py, data_dir, workers, test_limit)
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
 
     try:
         result = subprocess.run(
-            cmd, cwd=workspace_root, capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
-            timeout=300, env=env,
+            cmd,
+            cwd=workspace_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return jsonify({"error": "Sync timed out after 5 minutes"}), 504
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
+    output = (result.stdout + result.stderr).strip()
     if result.returncode != 0:
-        return jsonify({"error": "Sync failed", "output": (result.stdout + result.stderr).strip()}), 500
-    return jsonify({"ok": True, "output": (result.stdout + result.stderr).strip()})
+        return jsonify({"error": "Sync failed", "output": output}), 500
+    return jsonify({"ok": True, "output": output})
 
+
+# ---------------------------------------------------------------------------
+# GET /api/sync/stream
+# ---------------------------------------------------------------------------
 
 @sync_bp.route("/sync/stream")
 def stream_sync():
-    """GET /api/sync/stream?mode=<mode>[&from=<line>]
+    """Stream sync output as SSE.
 
-    Streams sync output as SSE.  If a sync for this mode is already running,
-    the new connection replays buffered output from line <from> (default 0)
-    then tails live — no new process is spawned.
-
+    If a sync for this mode is already running, replays buffered output from
+    line ?from=<n> (default 0) then tails live — no new process is spawned.
     A final ``event: done`` carries the exit code.
     """
     mode = request.args.get("mode", "missing")
@@ -243,6 +254,13 @@ def stream_sync():
     except (ValueError, TypeError):
         workers = 20
 
+    try:
+        test_limit = int(request.args.get("test_limit", 10000))
+        if test_limit < 1:
+            test_limit = 10000
+    except (ValueError, TypeError):
+        test_limit = 10000
+
     db_path = current_app.config["DB_PATH"]
     main_py, data_dir, workspace_root = _resolve_paths(db_path)
 
@@ -251,14 +269,13 @@ def stream_sync():
             yield f"event: error\ndata: main.py not found at {main_py}\n\n"
         return Response(stream_with_context(_err()), mimetype="text/event-stream")
 
-    cmd = _build_cmd(mode, main_py, data_dir, workers)
+    cmd = _build_cmd(mode, main_py, data_dir, workers, test_limit)
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
 
     session = get_or_start_session(mode, cmd, workspace_root, env)
 
     def generate():
         for idx, line in session.tail(from_line=from_line):
-            # Send line index as SSE id so client knows where to resume
             yield f"id: {idx}\ndata: {line}\n\n"
         yield f"event: done\ndata: {session.exit_code}\n\n"
 

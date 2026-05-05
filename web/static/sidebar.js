@@ -46,8 +46,9 @@ function _displayName(label) {
   const map = {
     INBOX: "Inbox", SENT: "Sent", STARRED: "Starred", IMPORTANT: "Important",
     DRAFT: "Drafts", DRAFTS: "Drafts", TRASH: "Trash", SPAM: "Spam",
-    UNREAD: "Unread", CATEGORY_SOCIAL: "Social", CATEGORY_UPDATES: "Updates",
+    UNREAD: "Unread", CHAT: "Chat", CATEGORY_SOCIAL: "Social", CATEGORY_UPDATES: "Updates",
     CATEGORY_PROMOTIONS: "Promotions", CATEGORY_FORUMS: "Forums",
+    CATEGORY_PURCHASES: "Purchases",
   };
   return map[label.toUpperCase()] || label;
 }
@@ -104,26 +105,159 @@ const sidebar = {
     };
 
     // "All Mail" always first
-    ul.appendChild(makeItem("", _sidebarIcons.allMail, "All Mail"));
+    const allMailItem = makeItem("", _sidebarIcons.allMail, "All Mail");
+    allMailItem.classList.add("sidebar-item-allmail");
+    ul.appendChild(allMailItem);
 
-    // System labels in a preferred order, then custom labels
-    const systemOrder = ["INBOX","STARRED","IMPORTANT","SENT","DRAFTS","DRAFT","CATEGORY_SOCIAL","CATEGORY_UPDATES","CATEGORY_PROMOTIONS","CATEGORY_FORUMS","SPAM","TRASH"];
     const labels = typeof state !== "undefined" ? (state.labels || []) : [];
-    const labelStrings = labels.map(l => typeof l === "string" ? l : (l.name || l));
 
-    // Sort: system labels in preferred order first, then custom alphabetically
-    const sorted = [...labelStrings].sort((a, b) => {
-      const ai = systemOrder.indexOf(a.toUpperCase());
-      const bi = systemOrder.indexOf(b.toUpperCase());
-      if (ai !== -1 && bi !== -1) return ai - bi;
-      if (ai !== -1) return -1;
-      if (bi !== -1) return 1;
-      return a.localeCompare(b);
+    // Support both old string[] and new {label, label_type}[] formats
+    const systemOrder = ["INBOX","STARRED","SNOOZED","IMPORTANT","SENT","SCHEDULED","DRAFTS","ALL_MAIL","SPAM","TRASH","CHAT"];
+    const categoryOrder = ["CATEGORY_PURCHASES","CATEGORY_SOCIAL","CATEGORY_UPDATES","CATEGORY_FORUMS","CATEGORY_PROMOTIONS"];
+
+    const systemLabels = [];
+    const categoryLabels = [];
+    const customLabels = [];
+
+    labels.forEach(entry => {
+      const label = typeof entry === "string" ? entry : entry.label;
+      const type  = typeof entry === "string"
+        ? (systemOrder.includes(label.toUpperCase()) ? "system"
+          : categoryOrder.includes(label.toUpperCase()) ? "category" : "label")
+        : entry.label_type;
+
+      if (type === "system") systemLabels.push(label);
+      else if (type === "category") categoryLabels.push(label);
+      else customLabels.push(label);
     });
 
-    sorted.forEach(label => {
+    // Sort system labels in preferred order
+    systemLabels.sort((a, b) =>
+      systemOrder.indexOf(a.toUpperCase()) - systemOrder.indexOf(b.toUpperCase())
+    );
+
+    // ── System labels ────────────────────────────────────────────────────
+    systemLabels.forEach(label => {
       ul.appendChild(makeItem(label, _iconForLabel(label), _displayName(label)));
     });
+
+    // ── Categories section header ────────────────────────────────────────
+    if (categoryLabels.length > 0) {
+      const catHeader = document.createElement("li");
+      catHeader.className = "sidebar-section-header";
+      catHeader.textContent = "Categories";
+      ul.appendChild(catHeader);
+
+      categoryLabels.sort((a, b) =>
+        categoryOrder.indexOf(a.toUpperCase()) - categoryOrder.indexOf(b.toUpperCase())
+      );
+      categoryLabels.forEach(label => {
+        ul.appendChild(makeItem(label, _iconForLabel(label), _displayName(label)));
+      });
+    }
+
+    // ── Labels section header + tree ─────────────────────────────────────
+    if (customLabels.length > 0) {
+      const lblHeader = document.createElement("li");
+      lblHeader.className = "sidebar-section-header";
+      lblHeader.textContent = "Labels";
+      ul.appendChild(lblHeader);
+
+      // Build tree from slash-separated labels
+      const tree = {};
+      customLabels.sort().forEach(label => {
+        const parts = label.split("/");
+        let node = tree;
+        parts.forEach((part, i) => {
+          if (!node[part]) node[part] = { _fullPath: parts.slice(0, i + 1).join("/"), _children: {} };
+          node = node[part]._children;
+        });
+      });
+
+      const COLLAPSED_KEY = "arkchive-sidebar-collapsed-cats";
+      let collapsedCats;
+      try { collapsedCats = new Set(JSON.parse(localStorage.getItem(COLLAPSED_KEY) || "[]")); }
+      catch (_) { collapsedCats = new Set(); }
+
+      function saveCollapsed() {
+        try { localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsedCats])); } catch (_) {}
+      }
+
+      function renderTree(node, parentUl, depth) {
+        Object.keys(node).sort().forEach(key => {
+          const entry = node[key];
+          const fullPath = entry._fullPath;
+          const hasChildren = Object.keys(entry._children).length > 0;
+
+          if (hasChildren) {
+            // Default collapsed on first visit
+            if (!collapsedCats.has(fullPath + "__seen")) {
+              collapsedCats.add(fullPath);
+              collapsedCats.add(fullPath + "__seen");
+              saveCollapsed();
+            }
+
+            const catLi = document.createElement("li");
+            catLi.className = "sidebar-item sidebar-item--cat";
+            catLi.setAttribute("data-label", fullPath);
+            catLi.setAttribute("title", fullPath);
+            catLi.style.paddingLeft = depth > 0 ? `${depth * 16}px` : "";
+            if (activeLabel === fullPath) catLi.classList.add("sidebar-item--active");
+
+            const iconEl = document.createElement("span");
+            iconEl.className = "sidebar-item-icon";
+            iconEl.setAttribute("aria-hidden", "true");
+            iconEl.innerHTML = _sidebarIcons.tag;
+
+            const textEl = document.createElement("span");
+            textEl.className = "sidebar-item-label";
+            textEl.textContent = key;
+
+            const chevron = document.createElement("span");
+            chevron.className = "sidebar-cat-chevron";
+            chevron.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12"><polyline points="6,9 12,15 18,9"/></svg>`;
+            if (collapsedCats.has(fullPath)) chevron.classList.add("sidebar-cat-chevron--collapsed");
+
+            catLi.appendChild(iconEl);
+            catLi.appendChild(textEl);
+            catLi.appendChild(chevron);
+
+            const childUl = document.createElement("ul");
+            childUl.className = "sidebar-cat-children";
+            childUl.setAttribute("role", "list");
+            if (collapsedCats.has(fullPath)) childUl.setAttribute("hidden", "");
+
+            // Chevron click toggles children
+            chevron.addEventListener("click", (e) => {
+              e.stopPropagation();
+              if (collapsedCats.has(fullPath)) {
+                collapsedCats.delete(fullPath);
+                childUl.removeAttribute("hidden");
+                chevron.classList.remove("sidebar-cat-chevron--collapsed");
+              } else {
+                collapsedCats.add(fullPath);
+                childUl.setAttribute("hidden", "");
+                chevron.classList.add("sidebar-cat-chevron--collapsed");
+              }
+              saveCollapsed();
+            });
+
+            // Label click selects the category as a filter
+            catLi.addEventListener("click", () => sidebar._selectLabel(fullPath));
+
+            parentUl.appendChild(catLi);
+            parentUl.appendChild(childUl);
+            renderTree(entry._children, childUl, depth + 1);
+          } else {
+            const li = makeItem(fullPath, _iconForLabel(key), key);
+            li.style.paddingLeft = depth > 0 ? `${depth * 16}px` : "";
+            parentUl.appendChild(li);
+          }
+        });
+      }
+
+      renderTree(tree, ul, 0);
+    }
 
     // Read/unread filter
     this._renderReadFilter(nav);
@@ -180,6 +314,18 @@ const sidebar = {
     else if (typeof state !== "undefined" && typeof state.onFilterChange === "function") state.onFilterChange();
   },
 
+  _updateFooterOffset() {
+    const footer = document.getElementById("db-stats-footer");
+    if (!footer) return;
+    if (this._isOffCanvas()) {
+      footer.style.left = "0";
+      return;
+    }
+    const nav = document.getElementById("sidebar");
+    const collapsed = nav && nav.classList.contains("sidebar--collapsed");
+    footer.style.left = collapsed ? "52px" : "220px";
+  },
+
   _updateToggleBtn() {
     const btn = document.getElementById("sidebar-toggle");
     if (!btn) return;
@@ -198,6 +344,7 @@ const sidebar = {
     else nav.classList.add("sidebar--collapsed");
     if (typeof state !== "undefined") state.sidebarCollapsed = true;
     this._updateToggleBtn();
+    this._updateFooterOffset();
   },
 
   expand() {
@@ -207,6 +354,7 @@ const sidebar = {
     else nav.classList.remove("sidebar--collapsed");
     if (typeof state !== "undefined") state.sidebarCollapsed = false;
     this._updateToggleBtn();
+    this._updateFooterOffset();
   },
 
   toggle() {
@@ -245,6 +393,7 @@ const sidebar = {
     }
 
     this.render();
+    this._updateFooterOffset();
   },
 };
 

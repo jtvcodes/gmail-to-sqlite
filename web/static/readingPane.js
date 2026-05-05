@@ -167,7 +167,7 @@ const readingPane = {
 
     const dateSpan = document.createElement("span");
     dateSpan.className = "rp-date";
-    const dateVal = message.received_date || message.timestamp;
+    const dateVal = message.timestamp;
     dateSpan.textContent = dateVal ? new Date(dateVal).toLocaleString() : "";
     meta.appendChild(dateSpan);
 
@@ -262,20 +262,21 @@ const readingPane = {
     // Render body content — reuse renderBody() from messageDetail.js
     function writeBody(view) {
       if (typeof renderBody === "function") {
-        // renderBody auto-resizes the iframe — we override that for the pane
-        // by setting height to 100% via CSS instead
         renderBody(bodyFrame, message, view);
-        // Cancel the auto-resize: the pane controls height via CSS flex
         bodyFrame.style.height = "";
       } else {
-        // Fallback if renderBody isn't available
         const hasHtml = message.body_html != null && message.body_html !== "";
         const doc = bodyFrame.contentDocument || bodyFrame.contentWindow.document;
         doc.open();
+        const isFullDoc = hasHtml && (/^\s*<!DOCTYPE\s/i.test(message.body_html) || /^\s*<html[\s>]/i.test(message.body_html));
         if (hasHtml && view !== "text") {
-          doc.write("<!DOCTYPE html><html><head><meta charset='UTF-8'>" +
-            "<style>body{margin:0;padding:8px;font-family:-apple-system,sans-serif;font-size:14px}img{max-width:100%}</style>" +
-            "</head><body>" + message.body_html + "</body></html>");
+          if (isFullDoc) {
+            doc.write(message.body_html);
+          } else {
+            doc.write("<!DOCTYPE html><html><head><meta charset='UTF-8'>" +
+              "<style>body{margin:0;padding:8px;font-family:-apple-system,sans-serif;font-size:14px}img{max-width:100%}</style>" +
+              "</head><body>" + message.body_html + "</body></html>");
+          }
         } else {
           const raw = (message.body || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
           doc.write("<!DOCTYPE html><html><head><meta charset='UTF-8'>" +

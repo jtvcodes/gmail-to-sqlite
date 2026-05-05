@@ -1,7 +1,6 @@
 import concurrent.futures
 import base64
 import logging
-import os
 import socket
 import threading
 import time
@@ -47,99 +46,6 @@ def _get_thread_service(credentials: Any) -> Any:
     if not hasattr(_thread_local, "service"):
         _thread_local.service = _create_service(credentials)
     return _thread_local.service
-
-
-def _resolve_attachment_ids(service: Any, message_id: str, attachments: List) -> None:
-    """Fetch the Gmail API JSON payload to resolve attachment_ids by filename.
-
-    Called when attachments were parsed from RFC 2822 source and have no
-    attachment_id.  Mutates the attachment objects in-place.
-    """
-    try:
-        result = service.users().messages().get(
-            userId="me", id=message_id, format="full"
-        ).execute()
-        payload = result.get("payload", {})
-
-        def _walk(parts):
-            for part in parts:
-                att_id = part.get("body", {}).get("attachmentId")
-                if not att_id:
-                    if "parts" in part:
-                        _walk(part["parts"])
-                    continue
-                # Match by filename
-                part_filename = None
-                for h in part.get("headers", []):
-                    if h["name"].lower() == "content-disposition":
-                        import email.message as _em
-                        m = _em.Message()
-                        m["Content-Disposition"] = h["value"]
-                        part_filename = m.get_param("filename", header="content-disposition")
-                if part_filename is None:
-                    for h in part.get("headers", []):
-                        if h["name"].lower() == "content-type":
-                            import email.message as _em
-                            m = _em.Message()
-                            m["Content-Type"] = h["value"]
-                            part_filename = m.get_param("name")
-                if part_filename:
-                    for att in attachments:
-                        if att.attachment_id is None and att.filename == part_filename:
-                            att.attachment_id = att_id
-                if "parts" in part:
-                    _walk(part["parts"])
-
-        _walk(payload.get("parts", []))
-    except Exception as e:
-        logging.warning(f"Could not resolve attachment IDs for message {message_id}: {e}")
-
-
-def _save_attachments_to_disk(service: Any, msg: Any, data_dir: str) -> None:
-    """Download real attachments to data/attachments/<message_id>/ while tokens are fresh."""
-    attachments = getattr(msg, "attachments", [])
-    if not attachments:
-        return
-
-    # Filter to attachments that have a filename and aren't multipart containers
-    candidates = [
-        att for att in attachments
-        if att.filename and not att.mime_type.startswith("multipart/")
-    ]
-    if not candidates:
-        return
-
-    # If any attachment is missing an attachment_id (parsed from RFC 2822),
-    # fetch the Gmail API JSON payload once to resolve them all by filename.
-    if any(att.attachment_id is None for att in candidates):
-        _resolve_attachment_ids(service, msg.id, candidates)
-
-    for att in candidates:
-        if not att.attachment_id:
-            logging.warning(f"No attachment_id for {att.filename} in message {msg.id}, skipping")
-            continue
-
-        cache_dir = os.path.join(data_dir, "attachments", msg.id)
-        cache_path = os.path.join(cache_dir, att.filename)
-
-        if os.path.isfile(cache_path):
-            continue  # already cached
-
-        try:
-            result = (
-                service.users()
-                .messages()
-                .attachments()
-                .get(userId="me", messageId=msg.id, id=att.attachment_id)
-                .execute()
-            )
-            data = base64.urlsafe_b64decode(result.get("data", ""))
-            os.makedirs(cache_dir, exist_ok=True)
-            with open(cache_path, "wb") as f:
-                f.write(data)
-            logging.info(f"Cached attachment {att.filename} for message {msg.id}")
-        except Exception as e:
-            logging.warning(f"Could not download attachment {att.filename} for message {msg.id}: {e}")
 
 
 def _fetch_message(
@@ -693,12 +599,15 @@ def all_messages(
             last = db.last_indexed()
             if last:
                 query.append(f"after:{_safe_timestamp(last)}")
+
+        logging.info("STATUS: Connecting…")
         service = _create_service(credentials)
         labels = get_labels(service)
 
         # ── Step 1: Apply history changes (read/delete/label updates) ──────────
         stored_history_id = db.get_sync_state("history_id")
         if stored_history_id is not None and not force:
+            logging.info("STATUS: Checking for changes…")
             try:
                 added_ids, deleted_ids, label_changes, new_history_id = \
                     get_changed_message_ids_from_history(
@@ -737,6 +646,7 @@ def all_messages(
         )
 
         if needs_full_list:
+            logging.info("STATUS: Collecting message IDs…")
             logging.info("Collecting full Gmail ID list...")
             all_gmail_ids, new_history_id = get_message_ids_from_gmail(
                 service, query, limit=limit, check_shutdown=check_shutdown
@@ -767,16 +677,22 @@ def all_messages(
             unsynced = set(db.get_unsynced_gmail_ids())
             needs_raw = set(db.get_message_ids_missing_raw())
             if needs_full_list:
-                # Intersect with what Gmail returned (respects --delta / limit)
                 gmail_set = set(all_message_ids)
-                all_message_ids = list((unsynced | needs_raw) & gmail_set)
+                # IDs Gmail returned that aren't in the messages table yet
+                # (covers new messages whose gmail_index row was already synced=True
+                # from a previous run, which would be missed by the unsynced set)
+                existing = set(db.get_all_message_ids())
+                not_in_db = gmail_set - existing
+                # Also pick up anything the index knows is unsynced within this batch
+                also_unsynced = unsynced & gmail_set
+                all_message_ids = list(not_in_db | also_unsynced | (needs_raw & gmail_set))
             else:
                 # History path already updated the index — just fetch unsynced
                 all_message_ids = list(unsynced | needs_raw)
 
             logging.info(
                 f"To fetch: {len(all_message_ids)} "
-                f"({len(unsynced)} unsynced, {len(needs_raw)} missing raw)."
+                f"({len(unsynced)} unsynced in index, {len(needs_raw)} missing raw)."
             )
 
         # Apply test limit as a safety net (collection should already be limited)
@@ -784,6 +700,10 @@ def all_messages(
             all_message_ids = all_message_ids[:limit]
 
         logging.info(f"Found {len(all_message_ids)} messages to sync.")
+        if len(all_message_ids) > 0:
+            logging.info(f"STATUS: Downloading {len(all_message_ids)} messages…")
+        else:
+            logging.info("STATUS: Done — 0 messages to download")
 
         total_synced_count = 0
         processed_count = 0
@@ -834,7 +754,6 @@ def all_messages(
                         else:
                             logging.info(f"Successfully synced message {mid}")
                     except (db.DatabaseError, IntegrityError) as e:
-                        # Roll back the whole transaction and propagate
                         raise SyncError(
                             f"Database error saving message {mid}: {e}"
                         ) from e
@@ -872,6 +791,9 @@ def all_messages(
                     if len(pending_batch) >= DB_WRITE_BATCH_SIZE:
                         total_synced_count += flush_batch(pending_batch)
                         pending_batch = []
+                        logging.info(
+                            f"STATUS: Saving to database… ({total_synced_count} of {len(all_message_ids)})"
+                        )
 
                     if (
                         processed_count % PROGRESS_LOG_INTERVAL == 0
@@ -904,8 +826,12 @@ def all_messages(
                 raise db_error
 
         if check_shutdown and check_shutdown():
+            logging.info("STATUS: Stopped — sync interrupted")
             logging.info("Sync process was interrupted. Partial results saved.")
         else:
+            logging.info(
+                f"STATUS: Done — {total_synced_count} message{'s' if total_synced_count != 1 else ''} synced"
+            )
             logging.info(
                 f"Total messages successfully synced: {total_synced_count} out of {len(all_message_ids)}"
             )

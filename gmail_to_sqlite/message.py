@@ -3,7 +3,6 @@ import email
 import email.header
 import email.message
 import logging
-from dataclasses import dataclass
 from datetime import datetime
 from email.utils import parseaddr, parsedate_to_datetime
 from typing import Dict, List, Optional
@@ -34,18 +33,6 @@ def _decode_header(value: Optional[str]) -> Optional[str]:
         return "".join(decoded_parts)
     except Exception:
         return value
-
-
-@dataclass
-class Attachment:
-    """Represents an email attachment extracted from a Gmail API payload."""
-
-    filename: Optional[str]
-    mime_type: str
-    size: int
-    data: Optional[bytes]
-    attachment_id: Optional[str]
-    content_id: Optional[str] = None
 
 
 class MessageParsingError(Exception):
@@ -82,12 +69,10 @@ class Message:
         self.body: Optional[str] = None
         self.body_html: Optional[str] = None
         self.raw: Optional[str] = None
-        self.received_date: Optional[datetime] = None
         self.size: int = 0
         self.timestamp: Optional[datetime] = None
         self.is_read: bool = False
         self.is_outgoing: bool = False
-        self.attachments: List[Attachment] = []
 
     @classmethod
     def from_raw(cls, raw: Dict, labels: Dict[str, str]) -> "Message":
@@ -154,7 +139,11 @@ class Message:
                 try:
                     msg.timestamp = parsedate_to_datetime(date_header)
                 except Exception:
-                    msg.timestamp = None
+                    received_header = parsed.get("Received", "")
+                    try:
+                        msg.timestamp = msg._parse_received_date(parsed)
+                    except:
+                        msg.timestamp = None
 
             # Extract plain-text body by walking MIME parts
             plain_body: Optional[str] = None
@@ -200,12 +189,6 @@ class Message:
 
             # Store the full raw RFC 2822 string
             msg.raw = raw_str
-
-            # Extract received_date
-            msg.received_date = msg._parse_received_date(parsed)
-
-            # Extract attachments from the RFC 2822 MIME parts
-            msg.attachments = msg._extract_attachments_from_mime(parsed)
 
             # Labels are passed in as a mapping; RFC 2822 source has no label IDs
             # so we leave msg.labels empty (caller can set them if needed)
@@ -434,150 +417,6 @@ class Message:
 
         return None
 
-    def _extract_attachments_from_mime(self, parsed_email) -> List["Attachment"]:
-        """
-        Extract attachments from a parsed RFC 2822 email.message.Message object.
-
-        Walks all MIME parts and collects non-body parts that have a filename
-        or a Content-ID (inline images).  The binary data is NOT loaded here —
-        it will be fetched from the Gmail API by _save_attachments_to_disk
-        using the attachment_id.  We only need the metadata (filename,
-        mime_type, content_id) plus the attachment_id so the downloader knows
-        which Gmail API token to use.
-
-        Note: RFC 2822 parts do not carry a Gmail attachment_id — that comes
-        from the Gmail API JSON payload.  We set attachment_id to None here;
-        _save_attachments_to_disk will match by filename when the id is absent.
-        """
-        attachments: List[Attachment] = []
-        if not parsed_email.is_multipart():
-            return attachments
-
-        for part in parsed_email.walk():
-            mime_type = part.get_content_type()
-            # Skip body parts and multipart containers
-            if mime_type in ("text/plain", "text/html") or mime_type.startswith("multipart/"):
-                continue
-
-            # Filename from Content-Disposition or Content-Type name param
-            filename: Optional[str] = part.get_filename()
-            if not filename:
-                filename = part.get_param("name")
-            if filename:
-                filename = _decode_header(filename)
-
-            # Content-ID for inline images (cid: references)
-            content_id: Optional[str] = None
-            raw_cid = part.get("Content-ID", "")
-            if raw_cid:
-                content_id = raw_cid.strip("<>")
-
-            # Skip parts with neither a filename nor a content_id — nothing useful
-            if not filename and not content_id:
-                continue
-
-            size: int = 0
-            payload = part.get_payload(decode=True)
-            if payload:
-                size = len(payload)
-
-            attachments.append(
-                Attachment(
-                    filename=filename,
-                    mime_type=mime_type,
-                    size=size,
-                    data=None,          # fetched on demand from Gmail API
-                    attachment_id=None, # not available from RFC 2822; matched by filename
-                    content_id=content_id,
-                )
-            )
-
-        return attachments
-
-    def _extract_attachments(self, payload: Dict) -> List[Attachment]:
-        """
-        Walk a multipart payload and extract attachment parts.
-
-        Skips ``text/plain`` and ``text/html`` parts (body parts).  For every
-        remaining part, extracts filename, mime_type, size, data, and
-        attachment_id.  Non-multipart payloads return an empty list.  Any
-        per-part decoding failure sets ``data = None`` for that part and
-        continues without propagating the exception.
-
-        Args:
-            payload (Dict): The message payload from Gmail API.
-
-        Returns:
-            List[Attachment]: Extracted attachment objects.
-        """
-        if "parts" not in payload:
-            return []
-
-        attachments: List[Attachment] = []
-        for part in payload["parts"]:
-            mime_type = part.get("mimeType", "")
-            if mime_type in ("text/plain", "text/html"):
-                continue
-
-            # --- filename extraction (task 10.4) ---
-            filename: Optional[str] = None
-            headers = part.get("headers", [])
-
-            # Build a lookup dict for quick access
-            header_map: Dict[str, str] = {}
-            for h in headers:
-                header_map[h["name"].lower()] = h["value"]
-
-            # Try Content-Disposition filename parameter first
-            content_disposition = header_map.get("content-disposition", "")
-            if content_disposition:
-                msg = email.message.Message()
-                msg["Content-Disposition"] = content_disposition
-                filename = msg.get_param("filename", header="content-disposition")
-
-            # Fall back to Content-Type name parameter
-            if filename is None:
-                content_type = header_map.get("content-type", "")
-                if content_type:
-                    msg = email.message.Message()
-                    msg["Content-Type"] = content_type
-                    filename = msg.get_param("name")
-
-            # --- size ---
-            size: int = part.get("body", {}).get("size", 0)
-
-            # --- data decoding (task 10.5) ---
-            data: Optional[bytes] = None
-            raw_data = part.get("body", {}).get("data")
-            if raw_data is not None:
-                try:
-                    data = base64.urlsafe_b64decode(raw_data)
-                except Exception:
-                    data = None
-
-            # --- attachment_id (task 10.6) ---
-            attachment_id: Optional[str] = part.get("body", {}).get("attachmentId")
-
-            # --- content_id (for cid: inline image resolution) ---
-            content_id: Optional[str] = None
-            raw_cid = header_map.get("content-id", "")
-            if raw_cid:
-                # Strip angle brackets: <ii_abc123> → ii_abc123
-                content_id = raw_cid.strip("<>")
-
-            attachments.append(
-                Attachment(
-                    filename=filename,
-                    mime_type=mime_type,
-                    size=size,
-                    data=data,
-                    attachment_id=attachment_id,
-                    content_id=content_id,
-                )
-            )
-
-        return attachments
-
     def _extract_body(self, payload: Dict) -> None:
         """
         Extract the body text from message payload.
@@ -608,9 +447,6 @@ class Message:
                     if body_text:
                         self.body = self.html2text(body_text)
                         break
-
-        # Extract attachments from the payload (task 10.7)
-        self.attachments = self._extract_attachments(payload)
 
 
 # ---------------------------------------------------------------------------

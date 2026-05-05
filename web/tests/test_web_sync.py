@@ -21,7 +21,7 @@ def db_path(tmp_path):
         """CREATE TABLE messages (
             message_id TEXT PRIMARY KEY,
             thread_id TEXT, sender TEXT, recipients TEXT, labels TEXT,
-            subject TEXT, body TEXT, raw TEXT, received_date DATETIME,
+            subject TEXT, body TEXT, raw TEXT, DATETIME,
             size INTEGER, timestamp DATETIME, is_read INTEGER,
             is_outgoing INTEGER, is_deleted INTEGER, last_indexed DATETIME
         )"""

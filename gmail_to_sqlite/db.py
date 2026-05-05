@@ -3,11 +3,8 @@ from datetime import datetime
 from typing import Any, List, Optional
 
 from peewee import (
-    AutoField,
-    BlobField,
     BooleanField,
     DateTimeField,
-    ForeignKeyField,
     IntegerField,
     Model,
     Proxy,
@@ -55,7 +52,6 @@ class Message(Model):
     subject = TextField(null=True)
     body = TextField(null=True)
     raw = TextField(null=True)
-    received_date = DateTimeField(null=True)
     size = IntegerField()
     timestamp = DateTimeField(null=True)
     is_read = BooleanField()
@@ -66,28 +62,6 @@ class Message(Model):
     class Meta:
         database = database_proxy
         table_name = "messages"
-
-
-class Attachment(Model):
-    """Represents an email attachment linked to a message."""
-
-    id = AutoField()
-    message_id = ForeignKeyField(
-        Message,
-        backref="attachments",
-        column_name="message_id",
-        field="message_id",
-    )
-    filename = TextField(null=True)
-    mime_type = TextField()
-    size = IntegerField(default=0)
-    data = BlobField(null=True)
-    attachment_id = TextField(null=True)
-    content_id = TextField(null=True)
-
-    class Meta:
-        database = database_proxy
-        table_name = "attachments"
 
 
 class SyncState(Model):
@@ -105,7 +79,7 @@ def init(data_dir: str, enable_logging: bool = False) -> SqliteDatabase:
     """
     Initialize the database for the given data_dir.
 
-    Creates the messages and attachments tables if they don't already exist.
+    Creates the messages table if it doesn't already exist.
 
     Args:
         data_dir (str): The path where to store the data.
@@ -121,7 +95,7 @@ def init(data_dir: str, enable_logging: bool = False) -> SqliteDatabase:
         db_path = f"{data_dir}/{DATABASE_FILE_NAME}"
         db = SqliteDatabase(db_path)
         database_proxy.initialize(db)
-        db.create_tables([Message, Attachment, SyncState, GmailIndex], safe=True)
+        db.create_tables([Message, SyncState, GmailIndex], safe=True)
 
         if enable_logging:
             logger = logging.getLogger("peewee")
@@ -131,44 +105,6 @@ def init(data_dir: str, enable_logging: bool = False) -> SqliteDatabase:
         return db
     except Exception as e:
         raise DatabaseError(f"Failed to initialize database: {e}")
-
-
-def create_attachments(message_id: str, attachments: List) -> None:
-    """
-    Replaces all attachment rows for a message with the provided list.
-
-    Deletes any existing attachment rows for ``message_id`` first, then
-    bulk-inserts the new rows.  This makes the operation idempotent for
-    re-syncs.
-
-    Args:
-        message_id (str): The message ID whose attachments are being stored.
-        attachments (List): List of ``gmail_to_sqlite.message.Attachment``
-            dataclass instances.
-
-    Raises:
-        DatabaseError: If the delete or insert operation fails.
-    """
-    try:
-        Attachment.delete().where(Attachment.message_id == message_id).execute()
-        if attachments:
-            rows = [
-                {
-                    "message_id": message_id,
-                    "filename": a.filename,
-                    "mime_type": a.mime_type,
-                    "size": a.size,
-                    "data": a.data,
-                    "attachment_id": a.attachment_id,
-                    "content_id": a.content_id,
-                }
-                for a in attachments
-            ]
-            Attachment.insert_many(rows).execute()
-    except Exception as e:
-        raise DatabaseError(
-            f"Failed to save attachments for message {message_id}: {e}"
-        )
 
 
 def create_message(msg: Any) -> None:
@@ -192,7 +128,6 @@ def create_message(msg: Any) -> None:
             subject=msg.subject,
             body=msg.body,
             raw=msg.raw,
-            received_date=msg.received_date,
             size=msg.size,
             timestamp=msg.timestamp,
             is_read=msg.is_read,
@@ -207,10 +142,8 @@ def create_message(msg: Any) -> None:
                 Message.labels: msg.labels,
                 Message.is_deleted: False,
                 Message.raw: msg.raw,
-                Message.received_date: msg.received_date,
             },
         ).execute()
-        create_attachments(msg.id, getattr(msg, "attachments", []))
     except Exception as e:
         raise DatabaseError(f"Failed to save message {msg.id}: {e}")
 
@@ -222,7 +155,6 @@ def last_indexed() -> Optional[datetime]:
     Returns:
         Optional[datetime]: The timestamp of the last indexed message, or None if no messages exist.
     """
-
     msg = Message.select().order_by(Message.timestamp.desc()).first()
     if msg:
         timestamp: Optional[datetime] = msg.timestamp
@@ -238,7 +170,6 @@ def first_indexed() -> Optional[datetime]:
     Returns:
         Optional[datetime]: The timestamp of the first indexed message, or None if no messages exist.
     """
-
     msg = Message.select().order_by(Message.timestamp.asc()).first()
     if msg:
         timestamp: Optional[datetime] = msg.timestamp
@@ -261,7 +192,6 @@ def mark_messages_as_deleted(message_ids: List[str]) -> None:
         return
 
     try:
-        # Use the SQL IN clause with proper parameter binding
         batch_size = 100
         for i in range(0, len(message_ids), batch_size):
             batch = message_ids[i : i + batch_size]
@@ -400,7 +330,6 @@ def upsert_gmail_index(message_ids: List[str]) -> None:
             batch = message_ids[i:i + batch_size]
             rows = [{"message_id": mid, "synced": False, "last_sync_date": None}
                     for mid in batch]
-            # INSERT OR IGNORE — don't overwrite existing rows
             GmailIndex.insert_many(rows).on_conflict_ignore().execute()
     except Exception as e:
         raise DatabaseError(f"Failed to upsert gmail_index: {e}")

@@ -140,7 +140,7 @@ def test_base64url_decode_roundtrip(raw_text):
 
 
 # ---------------------------------------------------------------------------
-# Property 4: Message parse preserves raw, headers, and received_date
+# Property 4: Message parse preserves raw, headers
 # Validates: Requirements 3.2, 3.4, 3.7
 # ---------------------------------------------------------------------------
 
@@ -148,14 +148,13 @@ def test_base64url_decode_roundtrip(raw_text):
 @given(rfc2822_message_strategy())
 @settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 def test_parse_preserves_raw_headers_and_received_date(rfc2822_data):
-    """Feature: raw-message-source, Property 4: Message parse preserves raw, headers, and received_date
+    """Feature: raw-message-source, Property 4: Message parse preserves raw, headers,
 
     For any valid RFC 2822 string containing From, To, Subject, Date, and at
     least one Received: header with a semicolon-delimited date, parsing it with
     Message.from_raw_source SHALL produce a Message object where:
     - msg.raw equals the input string
     - all extracted header fields match the values present in the input
-    - msg.received_date equals the datetime parsed from the last Received: header's date portion
 
     **Validates: Requirements 3.2, 3.4, 3.7**
     """
@@ -175,22 +174,6 @@ def test_parse_preserves_raw_headers_and_received_date(rfc2822_data):
     assert msg.subject == subject or msg.subject == subject.strip(), (
         f"Expected subject {subject!r} (or stripped), got {msg.subject!r}"
     )
-
-    # received_date must be set (we always have at least one Received: header)
-    assert msg.received_date is not None, "received_date should not be None"
-
-    # received_date should match the last Received: header's date
-    last_received_dt = received_dates[-1]
-    if last_received_dt.tzinfo is None:
-        last_received_dt = last_received_dt.replace(tzinfo=timezone.utc)
-
-    # Compare timestamps (allow small tolerance for formatting round-trips)
-    expected_ts = int(last_received_dt.timestamp())
-    actual_ts = int(msg.received_date.timestamp())
-    assert abs(actual_ts - expected_ts) <= 1, (
-        f"received_date mismatch: expected ~{expected_ts}, got {actual_ts}"
-    )
-
 
 # ---------------------------------------------------------------------------
 # Property 5: HTML extraction round-trip
@@ -271,103 +254,6 @@ def test_html_stripping(preamble, body):
                     f"Expected unchanged string, got {result_no_tag!r} for input {safe_no_html!r}"
                 )
 
-
-# ---------------------------------------------------------------------------
-# Property 13: received_date uses last Received header
-# Validates: Requirements 3.7
-# ---------------------------------------------------------------------------
-
-
-@given(
-    st.lists(
-        st.datetimes(
-            min_value=_datetime(1970, 1, 1),
-            max_value=_datetime(2099, 12, 31),
-            timezones=st.just(timezone.utc),
-        ),
-        min_size=2,
-        max_size=5,
-    )
-)
-@settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
-def test_received_date_uses_last_header(dates):
-    """Feature: raw-message-source, Property 13: received_date extraction — last Received header used
-
-    For any RFC 2822 string containing multiple Received: headers each with a
-    valid semicolon-delimited date, _parse_received_date SHALL return the
-    datetime from the last header in document order.
-
-    **Validates: Requirements 3.7**
-    """
-    msg = MIMEText("plain text", "plain", "utf-8")
-    msg["From"] = "sender@example.com"
-    msg["To"] = "recipient@example.com"
-    msg["Subject"] = "Test"
-    msg["Date"] = "Mon, 01 Jan 2024 12:00:00 +0000"
-    for dt in dates:
-        msg["Received"] = f"by server.example.com; {_format_received_date(dt)}"
-
-    raw = msg.as_string()
-    parsed_email = _email.message_from_string(raw)
-
-    # Create a Message instance to call _parse_received_date
-    m = Message()
-    result = m._parse_received_date(parsed_email)
-
-    assert result is not None, "received_date should not be None"
-
-    # The last date in the list is the last Received: header added
-    last_dt = dates[-1]
-    expected_ts = int(last_dt.timestamp())
-    actual_ts = int(result.timestamp())
-    assert abs(actual_ts - expected_ts) <= 1, (
-        f"Expected last received date ~{expected_ts}, got {actual_ts}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Property 14: received_date fallback to X-Received
-# Validates: Requirements 3.7
-# ---------------------------------------------------------------------------
-
-
-@given(st.datetimes(
-    min_value=_datetime(1970, 1, 1),
-    max_value=_datetime(2099, 12, 31),
-    timezones=st.just(timezone.utc),
-))
-@settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
-def test_received_date_fallback_to_x_received(dt):
-    """Feature: raw-message-source, Property 14: received_date fallback to X-Received
-
-    For any RFC 2822 string with no Received: header but one X-Received: header
-    with a valid date, _parse_received_date SHALL return the datetime from the
-    last X-Received: header.
-
-    **Validates: Requirements 3.7**
-    """
-    msg = MIMEText("plain text", "plain", "utf-8")
-    msg["From"] = "sender@example.com"
-    msg["To"] = "recipient@example.com"
-    msg["Subject"] = "Test"
-    msg["Date"] = "Mon, 01 Jan 2024 12:00:00 +0000"
-    msg["X-Received"] = f"by xserver.example.com; {_format_received_date(dt)}"
-
-    raw = msg.as_string()
-    parsed_email = _email.message_from_string(raw)
-
-    m = Message()
-    result = m._parse_received_date(parsed_email)
-
-    assert result is not None, "received_date should not be None when X-Received is present"
-
-    expected_ts = int(dt.timestamp())
-    actual_ts = int(result.timestamp())
-    assert abs(actual_ts - expected_ts) <= 1, (
-        f"Expected X-Received date ~{expected_ts}, got {actual_ts}"
-    )
-
-
 # ---------------------------------------------------------------------------
 # DB layer helpers for Properties 9 and 10
 # ---------------------------------------------------------------------------
@@ -376,11 +262,11 @@ def test_received_date_fallback_to_x_received(dt):
 def _setup_test_db():
     """Create and return an in-memory SQLite database for property tests."""
     from playhouse.sqlite_ext import SqliteDatabase
-    from gmail_to_sqlite.db import database_proxy, Message, Attachment
+    from gmail_to_sqlite.db import database_proxy, Message
 
     db = SqliteDatabase(":memory:")
     database_proxy.initialize(db)
-    db.create_tables([Message, Attachment])
+    db.create_tables([Message])
     return db
 
 
@@ -403,103 +289,12 @@ def _make_msg_for_db(msg_id: str, raw_value, received_date_value):
     msg.subject = "Property Test"
     msg.body = "body text"
     msg.raw = raw_value
-    msg.received_date = received_date_value
     msg.size = 512
     msg.timestamp = datetime(2024, 1, 1, 12, 0, 0)
     msg.is_read = False
     msg.is_outgoing = False
     msg.attachments = []
     return msg
-
-
-# ---------------------------------------------------------------------------
-# Property 9: DB raw and received_date round-trip
-# Validates: Requirements 9.1, 9.2, 9.3, 9.4, 9.5, 9.6
-# ---------------------------------------------------------------------------
-
-
-@given(
-    st.one_of(st.none(), st.text()),
-    st.one_of(st.none(), st.datetimes()),
-)
-@settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
-def test_db_raw_and_received_date_roundtrip(raw_value, received_date):
-    """Feature: raw-message-source, Property 9: DB raw and received_date round-trip
-
-    For any Message object with a raw attribute and a received_date attribute
-    (each independently None or a value), calling create_message and then
-    querying the database SHALL return the same raw and received_date values.
-    When called again with different values (upsert), the stored values SHALL
-    be updated.
-
-    **Validates: Requirements 9.1, 9.2, 9.3, 9.4, 9.5, 9.6**
-    """
-    from gmail_to_sqlite.db import Message as DbMessage, create_message
-
-    db = _setup_test_db()
-    try:
-        msg_id = "prop9-msg-001"
-        msg = _make_msg_for_db(msg_id, raw_value, received_date)
-        create_message(msg)
-
-        stored = DbMessage.get(DbMessage.message_id == msg_id)
-        assert stored.raw == raw_value, (
-            f"raw mismatch after insert: expected {raw_value!r}, got {stored.raw!r}"
-        )
-
-        # For received_date, compare timestamps (peewee may strip microseconds)
-        if received_date is None:
-            assert stored.received_date is None, (
-                f"received_date should be None, got {stored.received_date!r}"
-            )
-        else:
-            assert stored.received_date is not None, (
-                f"received_date should not be None, got None"
-            )
-            # Compare truncated to seconds to handle microsecond precision loss
-            # Use direct datetime comparison after stripping microseconds
-            expected = received_date.replace(microsecond=0)
-            actual = stored.received_date.replace(microsecond=0)
-            # Normalize timezone info for comparison (peewee may strip tzinfo)
-            if expected.tzinfo is not None and actual.tzinfo is None:
-                from datetime import timezone as _tz
-                expected = expected.replace(tzinfo=None)
-            elif expected.tzinfo is None and actual.tzinfo is not None:
-                actual = actual.replace(tzinfo=None)
-            assert actual == expected, (
-                f"received_date mismatch: expected {expected!r}, got {actual!r}"
-            )
-
-        # Now upsert with different values
-        new_raw = None if raw_value is not None else "updated raw content"
-        new_received_date = None if received_date is not None else _datetime(2025, 6, 1, 0, 0, 0)
-        msg2 = _make_msg_for_db(msg_id, new_raw, new_received_date)
-        create_message(msg2)
-
-        stored2 = DbMessage.get(DbMessage.message_id == msg_id)
-        assert stored2.raw == new_raw, (
-            f"raw mismatch after upsert: expected {new_raw!r}, got {stored2.raw!r}"
-        )
-        if new_received_date is None:
-            assert stored2.received_date is None, (
-                f"received_date should be None after upsert, got {stored2.received_date!r}"
-            )
-        else:
-            assert stored2.received_date is not None, (
-                "received_date should not be None after upsert"
-            )
-            expected2 = new_received_date.replace(microsecond=0)
-            actual2 = stored2.received_date.replace(microsecond=0)
-            if expected2.tzinfo is not None and actual2.tzinfo is None:
-                expected2 = expected2.replace(tzinfo=None)
-            elif expected2.tzinfo is None and actual2.tzinfo is not None:
-                actual2 = actual2.replace(tzinfo=None)
-            assert actual2 == expected2, (
-                f"received_date mismatch after upsert: expected {expected2!r}, got {actual2!r}"
-            )
-    finally:
-        _teardown_test_db(db)
-
 
 # ---------------------------------------------------------------------------
 # Property 10: get_message_ids_missing_raw completeness
@@ -598,25 +393,12 @@ def _setup_api_test_db():
             subject       TEXT,
             body          TEXT,
             raw           TEXT,
-            received_date DATETIME,
             size          INTEGER,
             timestamp     DATETIME,
             is_read       INTEGER,
             is_outgoing   INTEGER,
             is_deleted    INTEGER,
             last_indexed  DATETIME
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE attachments (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            message_id    TEXT NOT NULL,
-            filename      TEXT,
-            mime_type     TEXT NOT NULL,
-            size          INTEGER NOT NULL DEFAULT 0,
-            data          BLOB,
-            attachment_id TEXT,
-            content_id    TEXT
         )
     """)
     conn.commit()
@@ -634,7 +416,6 @@ def _insert_message_with_raw(conn, message_id: str, raw_value):
             '["INBOX"]',
             "Property 8 Test", "plain body",
             raw_value,
-            None,  # received_date
             500,
             "2024-01-01T12:00:00",
             0, 0, 0,
@@ -695,7 +476,6 @@ def test_api_body_html_derivation(rfc2822_data):
                 subject       TEXT,
                 body          TEXT,
                 raw           TEXT,
-                received_date DATETIME,
                 size          INTEGER,
                 timestamp     DATETIME,
                 is_read       INTEGER,
@@ -704,20 +484,10 @@ def test_api_body_html_derivation(rfc2822_data):
                 last_indexed  DATETIME
             )
         """)
-        conn.execute("""
-            CREATE TABLE attachments (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                message_id    TEXT NOT NULL,
-                filename      TEXT,
-                mime_type     TEXT NOT NULL,
-                size          INTEGER NOT NULL DEFAULT 0,
-                data          BLOB,
-                attachment_id TEXT,
-                content_id    TEXT
-            )
-        """)
         conn.execute(
-            "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, "
+            "subject, body, raw, size, timestamp, is_read, is_outgoing, is_deleted, last_indexed) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 message_id, "thread-prop8",
                 '{"name": "Alice", "email": "alice@example.com"}',
@@ -725,7 +495,6 @@ def test_api_body_html_derivation(rfc2822_data):
                 '["INBOX"]',
                 "Property 8 Test", "plain body",
                 raw_str,
-                None,
                 500,
                 "2024-01-01T12:00:00",
                 0, 0, 0,

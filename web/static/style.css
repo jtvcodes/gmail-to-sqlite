@@ -682,11 +682,18 @@ header h1 {
   position: relative;
 }
 
-/* Minimize button inside the card */
-#sync-minimize-btn {
+/* Toolbar row inside the loading card (minimize + stop) */
+.loading-card-toolbar {
   position: absolute;
   top: var(--density-gap);
   right: var(--space-3);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* Minimize button inside the card */
+#sync-minimize-btn {
   width: 26px;
   height: 26px;
   border: 1px solid var(--color-border);
@@ -708,6 +715,34 @@ header h1 {
   background: var(--color-bg);
   color: var(--color-accent);
   border-color: var(--color-accent);
+}
+
+/* Stop button inside the card */
+.sync-stop-btn {
+  height: 26px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-danger, #e05252);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-danger, #e05252);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.sync-stop-btn[hidden] {
+  display: none;
+}
+.sync-stop-btn:hover {
+  background: var(--color-danger, #e05252);
+  color: #fff;
+}
+.sync-stop-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 /* Floating restore tab shown when sync window is minimized */
@@ -842,7 +877,7 @@ header h1 {
 .db-stats-footer {
   position: fixed;
   bottom: 0;
-  left: 0;
+  left: var(--sidebar-width, 220px);
   right: 0;
   background: var(--color-bg);
   border-top: 1px solid var(--color-border);
@@ -852,10 +887,191 @@ header h1 {
   z-index: 100;
   text-align: center;
   letter-spacing: 0.02em;
+  transition: left 0.2s ease;
+}
+
+/* Collapsed sidebar — footer shifts left */
+#sidebar.sidebar--collapsed ~ * .db-stats-footer,
+body:has(#sidebar.sidebar--collapsed) .db-stats-footer {
+  left: 52px;
+}
+
+/* Mobile — footer spans full width */
+@media (max-width: 767px) {
+  .db-stats-footer {
+    left: 0;
+  }
 }
 
 .db-stats-footer[hidden] {
   display: none;
+}
+
+/* ============================================================
+   SIDEBAR FOOTER BUTTON
+   ============================================================ */
+
+.sidebar-footer {
+  margin-top: auto;
+}
+
+.sidebar-footer-btn {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-2);
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  text-align: left;
+  transition: background 0.15s, color 0.15s;
+}
+
+.sidebar-footer-btn:hover {
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+}
+
+.sidebar-footer-btn svg {
+  flex-shrink: 0;
+}
+
+.sidebar-footer-btn-label {
+  overflow: hidden;
+  white-space: nowrap;
+  transition: opacity 0.15s;
+}
+
+#sidebar.sidebar--collapsed .sidebar-footer-btn-label {
+  opacity: 0;
+  pointer-events: none;
+  width: 0;
+}
+
+#sidebar.sidebar--collapsed .sidebar-footer-btn {
+  justify-content: center;
+}
+
+/* ============================================================
+   LOG CONSOLE MODAL
+   ============================================================ */
+
+.log-console-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+}
+
+.log-console-overlay[hidden] {
+  display: none;
+}
+
+.log-console-modal {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  width: min(860px, 92vw);
+  height: min(560px, 80vh);
+  overflow: hidden;
+}
+
+.log-console-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.log-console-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.sync-status-label {
+  font-size: var(--font-size-xs);
+  color: var(--color-accent);
+  font-weight: 500;
+  padding: 2px var(--space-2);
+  background: var(--color-accent-bg);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  flex: 1;
+  text-align: center;
+}
+
+.sync-status-label[hidden] {
+  display: none;
+}
+
+.log-console-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.log-console-action-btn {
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: var(--font-size-xs);
+  padding: 2px var(--space-2);
+  transition: background 0.15s, color 0.15s;
+}
+
+.log-console-action-btn:hover {
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+}
+
+.log-console-close-btn {
+  background: none;
+  border: none;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  transition: background 0.15s, color 0.15s;
+}
+
+.log-console-close-btn:hover {
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+}
+
+.log-console-output {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-3);
+  margin: 0;
+  font-family: var(--font-mono, "Fira Mono", "Consolas", monospace);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-primary);
+  background: var(--color-bg);
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 /* ============================================================
@@ -1039,11 +1255,14 @@ header h1 {
   background: var(--color-bg);
 }
 
-/* Scrollable content area */
+/* Scrollable content area — fixed flex column, no overflow here */
 #message-detail .detail-content {
   padding: var(--space-6);
   flex: 1;
-  overflow-y: auto;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 #message-detail .detail-subject {
@@ -1052,6 +1271,7 @@ header h1 {
   margin: 0 0 var(--space-4);
   clear: both;
   color: var(--color-text-primary);
+  flex-shrink: 0;
 }
 
 #message-detail .detail-meta {
@@ -1059,6 +1279,7 @@ header h1 {
   color: var(--color-text-secondary);
   margin-bottom: var(--space-4);
   line-height: 1.6;
+  flex-shrink: 0;
 }
 
 #message-detail .detail-labels {
@@ -1066,6 +1287,7 @@ header h1 {
   flex-wrap: wrap;
   gap: var(--space-1);
   margin-bottom: var(--space-4);
+  flex-shrink: 0;
 }
 
 #message-detail .detail-label {
@@ -1090,16 +1312,24 @@ header h1 {
   text-decoration: underline;
 }
 
+/* Body section — takes remaining height, iframe scrolls inside */
 #message-detail .detail-body {
   border-top: 1px solid var(--color-border);
   padding-top: var(--space-4);
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 #message-detail .detail-body-frame {
   width: 100%;
   border: none;
-  min-height: 100px;
+  flex: 1;
+  min-height: 0;
   display: block;
+  background: #ffffff;
 }
 
 /* ============================================================
@@ -1745,8 +1975,8 @@ object.attachment-preview-frame {
   outline: none;
 }
 
-/* All items after the first are indented */
-.sidebar-item + .sidebar-item {
+/* All items after All Mail */
+.sidebar-item:not(.sidebar-item-allmail) {
   margin-left: var(--space-3);
 }
 
@@ -1768,6 +1998,58 @@ object.attachment-preview-frame {
 .sidebar-item--active:hover {
   background: var(--color-accent-bg);
   color: var(--color-accent);
+}
+
+/* Section headers in sidebar (Categories, Labels) */
+.sidebar-section-header {
+  padding: var(--space-3) var(--space-2) var(--space-1);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  list-style: none;
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+#sidebar.sidebar--collapsed .sidebar-section-header {
+  opacity: 0;
+  height: 0;
+  padding: 0;
+}
+
+/* Category item — has chevron, acts as collapse toggle */
+.sidebar-item--cat {
+  cursor: pointer;
+  justify-content: space-between;
+}
+
+.sidebar-cat-chevron {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+  color: var(--color-text-secondary);
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+}
+
+.sidebar-cat-chevron--collapsed {
+  transform: rotate(-90deg);
+}
+
+/* Children list — indented, no extra padding */
+.sidebar-cat-children {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-left: 1px solid var(--color-border);
+  margin-left: var(--space-4);
+}
+
+.sidebar-cat-children[hidden] {
+  display: none;
 }
 
 /* SVG icon inside sidebar item */
@@ -1844,7 +2126,21 @@ object.attachment-preview-frame {
   font-weight: var(--font-weight-medium);
 }
 
-/* Sidebar footer — holds the collapse toggle */
+/* Sidebar header — holds the collapse toggle at the top */
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: var(--space-2) var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+#sidebar.sidebar--collapsed .sidebar-header {
+  justify-content: center;
+}
+
+/* Sidebar footer — kept for structure */
 .sidebar-footer {
   padding: var(--space-2) var(--space-2);
   border-top: 1px solid var(--color-border);
@@ -2252,7 +2548,7 @@ body.rp-dragging-below {
   border: none;
   display: block;
   min-height: 0;
-  background: var(--color-surface);
+  background: #ffffff;
 }
 
 /* ── Error / loading states ── */

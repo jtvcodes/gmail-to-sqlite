@@ -30,26 +30,12 @@ CREATE TABLE messages (
     subject       TEXT,
     body          TEXT,
     raw           TEXT,
-    received_date DATETIME,
     size          INTEGER,
     timestamp     DATETIME,
     is_read       INTEGER,
     is_outgoing   INTEGER,
     is_deleted    INTEGER,
     last_indexed  DATETIME
-)
-"""
-
-CREATE_ATTACHMENTS_TABLE_SQL = """
-CREATE TABLE attachments (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    message_id    TEXT NOT NULL REFERENCES messages(message_id),
-    filename      TEXT,
-    mime_type     TEXT NOT NULL,
-    size          INTEGER NOT NULL DEFAULT 0,
-    data          BLOB,
-    attachment_id TEXT,
-    content_id    TEXT
 )
 """
 
@@ -118,10 +104,9 @@ def _seed_db(path: str, messages: list) -> None:
     """Create the messages table and insert the given records."""
     conn = sqlite3.connect(path)
     conn.execute(CREATE_TABLE_SQL)
-    conn.execute(CREATE_ATTACHMENTS_TABLE_SQL)
     for i, msg in enumerate(messages):
         conn.execute(
-            "INSERT INTO messages VALUES (?,?,?,?,?,?,?,NULL,NULL,?,?,?,?,?,NULL)",
+            "INSERT INTO messages VALUES (?,?,?,?,?,?,?,NULL,?,?,?,?,?,NULL)",
             (
                 str(i),  # unique message_id by index
                 msg["thread_id"],

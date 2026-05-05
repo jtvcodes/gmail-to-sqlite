@@ -182,8 +182,7 @@ Returns a paginated list of message summaries.
       "timestamp": "2024-01-15T10:30:00",
       "is_read": false,
       "is_outgoing": false,
-      "is_deleted": false,
-      "has_attachments": true
+      "is_deleted": false
     }
   ],
   "total": 142,

@@ -1,46 +1,114 @@
+import email as _email_mod
 import json
 import logging
-import os
 import re
 import sqlite3
-import sys
 import threading
+from functools import lru_cache
+from typing import List, Optional
 
 import flask
-from flask import Blueprint, current_app, jsonify, make_response, request
+from flask import Blueprint, jsonify, request
 
-from gmail_to_sqlite.message import extract_html_from_raw, extract_attachment_from_raw, extract_attachment_by_content_id
-from web.db import get_db, has_sort_date_column, ensure_indexes, get_cached_count
-
-# Module-level cache: whether the has_attachments stored column exists.
-# Checked once per process — the column never disappears once added.
-_has_attachments_col: bool | None = None
-_has_attachments_col_lock = threading.Lock()
-
-
-def _has_stored_attachments_col(db) -> bool:
-    """Return True if messages table has a stored has_attachments column."""
-    global _has_attachments_col
-    with _has_attachments_col_lock:
-        if _has_attachments_col is not None:
-            return _has_attachments_col
-        try:
-            row = db.execute(
-                "SELECT 1 FROM pragma_table_info('messages') WHERE name='has_attachments'"
-            ).fetchone()
-            _has_attachments_col = row is not None
-            return _has_attachments_col
-        except Exception:  # noqa: BLE001
-            _has_attachments_col = False
-            return False
-
+from gmail_to_sqlite.message import (
+    _decode_header,
+    extract_html_from_raw,
+    extract_attachment_from_raw,
+    extract_attachment_by_content_id,
+)
+from web.db import get_db
 
 logger = logging.getLogger(__name__)
 
 messages_bp = Blueprint("messages", __name__)
 
 # ---------------------------------------------------------------------------
-# Helpers
+# In-process attachment metadata cache
+# Keyed by message_id → list of Attachment-like dicts (no binary data).
+# Thread-safe via a simple lock; bounded to 256 entries.
+# ---------------------------------------------------------------------------
+
+_att_cache: dict = {}
+_att_cache_lock = threading.Lock()
+_ATT_CACHE_MAX = 256
+
+
+def _cache_get(message_id: str) -> Optional[List[dict]]:
+    with _att_cache_lock:
+        return _att_cache.get(message_id)
+
+
+def _cache_set(message_id: str, attachments: List[dict]) -> None:
+    with _att_cache_lock:
+        if len(_att_cache) >= _ATT_CACHE_MAX:
+            # Evict the oldest entry (insertion-order dict, Python 3.7+)
+            oldest = next(iter(_att_cache))
+            del _att_cache[oldest]
+        _att_cache[message_id] = attachments
+
+
+def _parse_attachments_from_raw(raw: Optional[str]) -> List[dict]:
+    """Parse attachment metadata from a stored RFC 2822 string.
+
+    Returns a list of dicts with keys: filename, mime_type, size,
+    attachment_id (always None — not available from raw), content_id.
+    Binary data is NOT loaded; callers use extract_attachment_from_raw /
+    extract_attachment_by_content_id when they need the bytes.
+    """
+    if not raw:
+        return []
+    try:
+        parsed = _email_mod.message_from_string(raw)
+        if not parsed.is_multipart():
+            return []
+        results = []
+        for part in parsed.walk():
+            mime_type = part.get_content_type()
+            if mime_type in ("text/plain", "text/html") or mime_type.startswith("multipart/"):
+                continue
+
+            filename: Optional[str] = part.get_filename()
+            if not filename:
+                filename = part.get_param("name")
+            if filename:
+                filename = _decode_header(filename)
+
+            content_id: Optional[str] = None
+            raw_cid = part.get("Content-ID", "")
+            if raw_cid:
+                content_id = raw_cid.strip("<>")
+
+            if not filename and not content_id:
+                continue
+
+            payload = part.get_payload(decode=True)
+            size = len(payload) if payload else 0
+
+            results.append({
+                "filename": filename,
+                "mime_type": mime_type,
+                "size": size,
+                "attachment_id": None,   # not available from RFC 2822
+                "content_id": content_id,
+            })
+        return results
+    except Exception as exc:
+        logger.debug(f"Failed to parse attachments from raw: {exc}")
+        return []
+
+
+def _get_attachments(message_id: str, raw: Optional[str]) -> List[dict]:
+    """Return attachment metadata for a message, using the cache."""
+    cached = _cache_get(message_id)
+    if cached is not None:
+        return cached
+    attachments = _parse_attachments_from_raw(raw)
+    _cache_set(message_id, attachments)
+    return attachments
+
+
+# ---------------------------------------------------------------------------
+# Column sets
 # ---------------------------------------------------------------------------
 
 SUMMARY_FIELDS = (
@@ -50,7 +118,6 @@ SUMMARY_FIELDS = (
     "labels",
     "subject",
     "timestamp",
-    "received_date",
     "is_read",
     "is_outgoing",
     "is_deleted",
@@ -60,45 +127,18 @@ DETAIL_FIELDS = SUMMARY_FIELDS + ("recipients", "body", "raw")
 
 BOOL_FIELDS = {"is_read", "is_outgoing", "is_deleted"}
 
-
-def _make_attachment_response(data, mime_type, filename, preview):
-    """Build a Flask response for an attachment download or inline preview."""
-    disposition = "inline" if preview else f'attachment; filename="{filename}"'
-    resp = make_response(data)
-    resp.headers["Content-Type"] = mime_type
-    resp.headers["Content-Disposition"] = disposition
-    if preview:
-        resp.headers["X-Frame-Options"] = "SAMEORIGIN"
-        resp.headers["X-Content-Type-Options"] = "nosniff"
-    return resp
+JSON_FIELDS = {"sender", "recipients", "labels"}
 
 
-def _is_missing_table_error(exc: Exception) -> bool:
-    """Return True when exc is the specific 'no such table: messages' error."""
-    return (
-        isinstance(exc, sqlite3.OperationalError)
-        and str(exc) == "no such table: messages"
-    )
-
-
-def _parse_bool_param(value: str, name: str):
-    """Parse a 'true'/'false' query string value.
-
-    Returns True, False, or raises ValueError with a descriptive message.
-    """
-    if value.lower() == "true":
-        return True
-    if value.lower() == "false":
-        return False
-    raise ValueError(f"'{name}' must be 'true' or 'false'")
-
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _row_to_dict(row: sqlite3.Row, fields: tuple) -> dict:
-    """Convert a sqlite3.Row to a plain dict, JSON-decoding JSON columns."""
     d = {}
     for field in fields:
         val = row[field]
-        if field in ("sender", "recipients", "labels") and isinstance(val, str):
+        if field in JSON_FIELDS and isinstance(val, str):
             try:
                 val = json.loads(val)
             except (json.JSONDecodeError, TypeError):
@@ -109,13 +149,25 @@ def _row_to_dict(row: sqlite3.Row, fields: tuple) -> dict:
     return d
 
 
+def _parse_bool_param(value: str, name: str) -> bool:
+    if value.lower() == "true":
+        return True
+    if value.lower() == "false":
+        return False
+    raise ValueError(f"'{name}' must be 'true' or 'false'")
+
+
+def _missing_table(exc: Exception) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and "no such table" in str(exc)
+
+
 # ---------------------------------------------------------------------------
 # GET /api/messages
 # ---------------------------------------------------------------------------
 
 @messages_bp.route("/messages")
 def list_messages() -> flask.Response:
-    # --- pagination params ---
+    # --- pagination ---
     try:
         page = int(request.args.get("page", 1))
     except (ValueError, TypeError):
@@ -131,7 +183,7 @@ def list_messages() -> flask.Response:
     if not (1 <= page_size <= 200):
         return jsonify({"error": "'page_size' must be between 1 and 200"}), 400
 
-    # --- optional filters ---
+    # --- filters ---
     q = request.args.get("q", "").strip()
     label = request.args.get("label", "").strip()
 
@@ -152,13 +204,11 @@ def list_messages() -> flask.Response:
     include_deleted = False
     if "include_deleted" in request.args:
         try:
-            include_deleted = _parse_bool_param(
-                request.args["include_deleted"], "include_deleted"
-            )
+            include_deleted = _parse_bool_param(request.args["include_deleted"], "include_deleted")
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
 
-    # --- build WHERE clauses ---
+    # --- build WHERE ---
     conditions = []
     params: list = []
 
@@ -167,17 +217,15 @@ def list_messages() -> flask.Response:
 
     if q:
         conditions.append(
-            "(LOWER(subject) LIKE LOWER(?) OR LOWER(sender) LIKE LOWER(?) OR LOWER(body) LIKE LOWER(?) OR message_id = ?)"
+            "(LOWER(subject) LIKE LOWER(?) OR LOWER(sender) LIKE LOWER(?)"
+            " OR LOWER(body) LIKE LOWER(?) OR message_id = ?)"
         )
         like = f"%{q}%"
         params.extend([like, like, like, q])
 
     if label:
-        # JSON array exact-match: look for the label as a JSON string element
         conditions.append(
-            "EXISTS ("
-            "  SELECT 1 FROM json_each(labels) WHERE json_each.value = ?"
-            ")"
+            "EXISTS (SELECT 1 FROM json_each(labels) WHERE json_each.value = ?)"
         )
         params.append(label)
 
@@ -191,72 +239,38 @@ def list_messages() -> flask.Response:
 
     where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
-    # --- sort direction ---
+    # --- sort ---
     sort_dir = request.args.get("sort_dir", "desc").lower()
     if sort_dir not in ("asc", "desc"):
         sort_dir = "desc"
+    order_sql = f"ORDER BY timestamp {sort_dir.upper()}"
 
     db = get_db()
     try:
-        # Use sort_date generated column if available, fall back to COALESCE expression.
-        # sort_date may be missing on a fresh DB that was created after server start.
-        if has_sort_date_column(db):
-            order_sql = f"ORDER BY sort_date {sort_dir.upper()}"
-        else:
-            # Attempt to add the column + indexes now that the table exists
-            ensure_indexes(current_app.config["DB_PATH"])
-            order_sql = f"ORDER BY COALESCE(received_date, timestamp) {sort_dir.upper()}"
-    except Exception:  # noqa: BLE001
-        order_sql = f"ORDER BY COALESCE(received_date, timestamp) {sort_dir.upper()}"
+        total = db.execute(f"SELECT COUNT(*) FROM messages {where_sql}", params).fetchone()[0]
 
-    try:
-        # total count (cached to avoid full-table scan on every page load)
-        count_sql = f"SELECT COUNT(*) FROM messages {where_sql}"
-        total = get_cached_count(db, count_sql, params)
-
-        # paginated results
         offset = (page - 1) * page_size
-        fields_sql = ", ".join(SUMMARY_FIELDS)
-
-        # Use stored has_attachments column if available (avoids 50 correlated subqueries)
-        if _has_stored_attachments_col(db):
-            has_att_expr = "has_attachments"
-        else:
-            has_att_expr = (
-                "EXISTS(SELECT 1 FROM attachments a WHERE a.message_id = messages.message_id "
-                "  AND a.filename IS NOT NULL "
-                "  AND a.mime_type NOT LIKE 'multipart/%')"
-            )
-
-        data_sql = (
-            f"SELECT {fields_sql}, "
-            f"{has_att_expr} AS has_attachments "
-            f"FROM messages {where_sql} "
-            f"{order_sql} "
-            f"LIMIT ? OFFSET ?"
-        )
-        rows = db.execute(data_sql, params + [page_size, offset]).fetchall()
-
+        fields_sql = ", ".join(SUMMARY_FIELDS) + ", raw"
+        rows = db.execute(
+            f"SELECT {fields_sql} FROM messages {where_sql} {order_sql} LIMIT ? OFFSET ?",
+            params + [page_size, offset],
+        ).fetchall()
     except sqlite3.Error as exc:
-        print(f"Database error in list_messages: {exc}", file=sys.stderr)
-        if _is_missing_table_error(exc):
+        if _missing_table(exc):
             return jsonify({
-                "error": "Database not ready — please run the sync command to populate the database."
+                "error": "Database not ready — please run a sync to populate the database."
             }), 503
         return jsonify({"error": str(exc)}), 500
 
-    messages = [_row_to_dict(row, SUMMARY_FIELDS) for row in rows]
-    for i, row in enumerate(rows):
-        messages[i]["has_attachments"] = bool(row["has_attachments"])
+    messages = []
+    for row in rows:
+        msg = _row_to_dict(row, SUMMARY_FIELDS)
+        raw = row["raw"]
+        atts = _get_attachments(row["message_id"], raw)
+        msg["attachment_count"] = len(atts)
+        messages.append(msg)
 
-    return jsonify(
-        {
-            "messages": messages,
-            "total": total,
-            "page": page,
-            "page_size": page_size,
-        }
-    )
+    return jsonify({"messages": messages, "total": total, "page": page, "page_size": page_size})
 
 
 # ---------------------------------------------------------------------------
@@ -264,17 +278,14 @@ def list_messages() -> flask.Response:
 # ---------------------------------------------------------------------------
 
 @messages_bp.route("/messages/stats")
-def messages_stats():
-    """Return total message counts from the DB and gmail_index."""
+def messages_stats() -> flask.Response:
     try:
         db = get_db()
         total_messages = db.execute(
             "SELECT COUNT(*) FROM messages WHERE is_deleted = 0"
         ).fetchone()[0]
         try:
-            total_indexed = db.execute(
-                "SELECT COUNT(*) FROM gmail_index"
-            ).fetchone()[0]
+            total_indexed = db.execute("SELECT COUNT(*) FROM gmail_index").fetchone()[0]
             total_unsynced = db.execute(
                 "SELECT COUNT(*) FROM gmail_index WHERE synced = 0"
             ).fetchone()[0]
@@ -287,7 +298,7 @@ def messages_stats():
             "total_unsynced": total_unsynced,
         })
     except sqlite3.Error as exc:
-        if _is_missing_table_error(exc):
+        if _missing_table(exc):
             return jsonify({"total_messages": 0, "total_indexed": 0, "total_unsynced": 0})
         return jsonify({"error": str(exc)}), 500
 
@@ -306,315 +317,111 @@ def get_message(message_id: str) -> flask.Response:
             (message_id,),
         ).fetchone()
     except sqlite3.Error as exc:
-        print(f"Database error in get_message: {exc}", file=sys.stderr)
-        if _is_missing_table_error(exc):
-            return jsonify({
-                "error": "Database not ready — please run the sync command to populate the database."
-            }), 503
+        if _missing_table(exc):
+            return jsonify({"error": "Database not ready — please run a sync."}), 503
         return jsonify({"error": str(exc)}), 500
 
     if row is None:
         return jsonify({"error": "Message not found"}), 404
 
-    msg_dict = _row_to_dict(row, DETAIL_FIELDS)
+    msg = _row_to_dict(row, DETAIL_FIELDS)
+    raw = msg.get("raw")
 
-    # Query attachments (gracefully handle missing table)
+    # Attachments — derived on-the-fly from raw, cached in-process
+    msg["attachments"] = _get_attachments(message_id, raw)
+
+    # Derive body_html from stored raw RFC 2822 source
     try:
-        db = get_db()
-        attachment_rows = db.execute(
-            "SELECT filename, mime_type, size, attachment_id, content_id FROM attachments "
-            "WHERE message_id = ? "
-            "  AND filename IS NOT NULL "
-            "  AND mime_type NOT LIKE 'multipart/%'",
-            (message_id,),
-        ).fetchall()
-        attachments = [
-            {
-                "filename": r["filename"],
-                "mime_type": r["mime_type"],
-                "size": r["size"],
-                "attachment_id": r["attachment_id"],
-                "content_id": r["content_id"],
-            }
-            for r in attachment_rows
-        ]
-    except sqlite3.OperationalError as exc:
-        if "no such table: attachments" in str(exc):
-            attachments = []
-        else:
-            print(f"Database error querying attachments: {exc}", file=sys.stderr)
-            attachments = []
-
-    msg_dict["attachments"] = attachments
-
-    # Derive body_html on-the-fly from the stored raw RFC 2822 source
-    try:
-        raw_source = msg_dict.get("raw") or ""
-        body_html = extract_html_from_raw(raw_source)
+        body_html = extract_html_from_raw(raw or "")
         if body_html:
             body_html = re.sub(
                 r'cid:([^\s"\'>\)]+)',
                 lambda m: f'/api/cid/{m.group(1)}?msg={message_id}',
                 body_html
             )
-        msg_dict["body_html"] = body_html
-    except Exception as exc:  # noqa: BLE001
-        logger.error(f"Failed to extract body_html from raw for message {message_id}: {exc}")
-        msg_dict["body_html"] = None
+        msg["body_html"] = body_html
+    except Exception as exc:
+        logger.error(f"Failed to extract body_html for message {message_id}: {exc}")
+        msg["body_html"] = None
 
-    return jsonify(msg_dict)
-
-
-# ---------------------------------------------------------------------------
-# GET /api/messages/<message_id>/attachments/<attachment_id>/data
-# ---------------------------------------------------------------------------
-
-def _fetch_attachment_from_gmail(message_id: str, attachment_id: str, filename: str) -> bytes:
-    """Fetch attachment bytes from the Gmail API on demand.
-
-    Gmail attachment IDs are ephemeral tokens that expire. When the stored
-    attachment_id is stale we re-fetch the full message to get a fresh token,
-    then match by filename to find the right attachment.
-    """
-    import base64
-    from googleapiclient.discovery import build
-    from googleapiclient.errors import HttpError
-    from gmail_to_sqlite.auth import get_credentials
-
-    db_path = current_app.config["DB_PATH"]
-    data_dir = os.path.dirname(os.path.abspath(db_path))
-
-    creds = get_credentials(data_dir)
-    service = build("gmail", "v1", credentials=creds, cache_discovery=False)
-
-    def _download(att_id: str) -> bytes:
-        result = (
-            service.users()
-            .messages()
-            .attachments()
-            .get(userId="me", messageId=message_id, id=att_id)
-            .execute()
-        )
-        return base64.urlsafe_b64decode(result.get("data", ""))
-
-    # Try the stored attachment_id first
-    try:
-        return _download(attachment_id)
-    except HttpError as e:
-        if e.resp.status != 400:
-            raise
-        # Token expired — re-fetch the message to get a fresh token
-
-    raw_msg = service.users().messages().get(userId="me", id=message_id).execute()
-    payload = raw_msg.get("payload", {})
-
-    def _find_fresh_id(parts):
-        for part in parts:
-            # Match by filename
-            part_filename = None
-            for h in part.get("headers", []):
-                if h["name"].lower() == "content-disposition":
-                    import email.message as _em
-                    m = _em.Message()
-                    m["Content-Disposition"] = h["value"]
-                    part_filename = m.get_param("filename", header="content-disposition")
-            if part_filename is None:
-                for h in part.get("headers", []):
-                    if h["name"].lower() == "content-type":
-                        import email.message as _em
-                        m = _em.Message()
-                        m["Content-Type"] = h["value"]
-                        part_filename = m.get_param("name")
-            fresh_id = part.get("body", {}).get("attachmentId")
-            if part_filename == filename and fresh_id:
-                return fresh_id
-            # Recurse into nested parts
-            if "parts" in part:
-                found = _find_fresh_id(part["parts"])
-                if found:
-                    return found
-        return None
-
-    top_parts = payload.get("parts", [])
-    fresh_id = _find_fresh_id(top_parts)
-    if not fresh_id:
-        raise ValueError(f"Could not find fresh attachment token for '{filename}' in message {message_id}")
-
-    return _download(fresh_id)
-
-
-def _resolve_attachment_data(db, message_id: str, filename: str, row, attachment_id: str = "") -> bytes | None:
-    """Resolve attachment bytes using the raw → DB blob → Gmail API chain.
-
-    Returns the attachment bytes if found via any source, or None if all
-    sources are exhausted.
-
-    Args:
-        db: Active SQLite connection.
-        message_id: The Gmail message ID.
-        filename: The attachment filename (used for raw extraction and Gmail API lookup).
-        row: A sqlite3.Row from the attachments table containing at least a ``data`` column.
-        attachment_id: The Gmail attachment token (used for the Gmail API fallback).
-    """
-    # 1. Try extracting from the stored raw RFC 2822 source (no disk I/O or API call)
-    try:
-        raw_row = db.execute(
-            "SELECT raw FROM messages WHERE message_id = ?", (message_id,)
-        ).fetchone()
-        if raw_row and raw_row["raw"]:
-            data = extract_attachment_from_raw(raw_row["raw"], filename)
-            if data:
-                return data
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"Could not extract attachment from raw for {message_id}/{filename}: {exc}")
-
-    # 2. Fall back to DB blob (legacy rows that stored binary data)
-    if row["data"] is not None:
-        return bytes(row["data"])
-
-    # 3. Last resort — fetch from Gmail API on demand
-    try:
-        return _fetch_attachment_from_gmail(message_id, attachment_id, filename)
-    except Exception as exc:  # noqa: BLE001
-        import traceback
-        traceback.print_exc()
-        print(f"Failed to fetch attachment from Gmail: {exc}", file=sys.stderr)
-        return None
-
-
-@messages_bp.route("/messages/<message_id>/attachments/<attachment_id>/data")
-def get_attachment_data(message_id: str, attachment_id: str) -> flask.Response:
-    try:
-        db = get_db()
-        row = db.execute(
-            "SELECT data, mime_type, filename FROM attachments WHERE message_id = ? AND attachment_id = ?",
-            (message_id, attachment_id),
-        ).fetchone()
-    except sqlite3.OperationalError as exc:
-        if "no such table: attachments" in str(exc):
-            return jsonify({"error": "Attachment not found"}), 404
-        print(f"Database error in get_attachment_data: {exc}", file=sys.stderr)
-        return jsonify({"error": str(exc)}), 500
-    except sqlite3.Error as exc:
-        print(f"Database error in get_attachment_data: {exc}", file=sys.stderr)
-        return jsonify({"error": str(exc)}), 500
-
-    if row is None:
-        return jsonify({"error": "Attachment not found"}), 404
-
-    mime_type = row["mime_type"]
-    filename = row["filename"] or "attachment"
-    preview = request.args.get("preview") == "1"
-
-    data = _resolve_attachment_data(db, message_id, filename, row, attachment_id)
-    if data is None:
-        return jsonify({"error": "Could not retrieve attachment from Gmail"}), 502
-
-    return _make_attachment_response(data, mime_type, filename, preview)
+    return jsonify(msg)
 
 
 # ---------------------------------------------------------------------------
 # GET /api/messages/<message_id>/attachments/by-filename/<filename>/data
-# Serves attachments that have no attachment_id (parsed from RFC 2822 source).
 # ---------------------------------------------------------------------------
 
 @messages_bp.route("/messages/<message_id>/attachments/by-filename/<path:filename>/data")
 def get_attachment_data_by_filename(message_id: str, filename: str) -> flask.Response:
+    db = get_db()
     try:
-        db = get_db()
         row = db.execute(
-            "SELECT data, mime_type, filename FROM attachments "
-            "WHERE message_id = ? AND filename = ? AND mime_type NOT LIKE 'multipart/%' LIMIT 1",
-            (message_id, filename),
+            "SELECT raw FROM messages WHERE message_id = ?",
+            (message_id,),
         ).fetchone()
     except sqlite3.Error as exc:
-        print(f"Database error in get_attachment_data_by_filename: {exc}", file=sys.stderr)
         return jsonify({"error": str(exc)}), 500
 
     if row is None:
+        return jsonify({"error": "Message not found"}), 404
+
+    raw = row["raw"]
+
+    # Check the attachment exists in the metadata
+    atts = _get_attachments(message_id, raw)
+    att_meta = next((a for a in atts if a["filename"] == filename), None)
+    if att_meta is None:
         return jsonify({"error": "Attachment not found"}), 404
 
-    mime_type = row["mime_type"]
-    preview = request.args.get("preview") == "1"
-
-    # Look up the attachment_id for the Gmail API fallback
-    att_row = db.execute(
-        "SELECT attachment_id FROM attachments WHERE message_id = ? AND filename = ? LIMIT 1",
-        (message_id, filename),
-    ).fetchone()
-    att_id = att_row["attachment_id"] if att_row and att_row["attachment_id"] else ""
-
-    data = _resolve_attachment_data(db, message_id, filename, row, att_id)
+    data = extract_attachment_from_raw(raw, filename)
     if data is None:
-        return jsonify({"error": "Could not retrieve attachment"}), 502
+        return jsonify({"error": "Attachment data not available"}), 404
 
-    return _make_attachment_response(data, mime_type, filename, preview)
+    from flask import make_response
+    preview = request.args.get("preview") == "1"
+    disposition = "inline" if preview else f'attachment; filename="{filename}"'
+    resp = make_response(data)
+    resp.headers["Content-Type"] = att_meta["mime_type"]
+    resp.headers["Content-Disposition"] = disposition
+    return resp
 
 
 # ---------------------------------------------------------------------------
 # GET /api/cid/<content_id>?msg=<message_id>
-# Serves inline images referenced as cid: in HTML bodies.
 # ---------------------------------------------------------------------------
 
 @messages_bp.route("/cid/<path:content_id>")
 def get_cid_image(content_id: str) -> flask.Response:
-    """Resolve a cid: inline image reference to the actual attachment data.
-
-    The ?msg=<message_id> query param scopes the lookup to a specific message,
-    which is faster and avoids cross-message collisions.
-    """
     message_id = request.args.get("msg", "")
+    if not message_id:
+        return jsonify({"error": "msg parameter required"}), 400
 
+    db = get_db()
     try:
-        db = get_db()
-        if message_id:
-            row = db.execute(
-                "SELECT attachment_id, mime_type, filename FROM attachments "
-                "WHERE content_id = ? AND message_id = ? LIMIT 1",
-                (content_id, message_id),
-            ).fetchone()
-        else:
-            row = db.execute(
-                "SELECT attachment_id, mime_type, filename, message_id FROM attachments "
-                "WHERE content_id = ? LIMIT 1",
-                (content_id,),
-            ).fetchone()
+        row = db.execute(
+            "SELECT raw FROM messages WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()
     except sqlite3.Error as exc:
-        print(f"DB error in get_cid_image: {exc}", file=sys.stderr)
         return jsonify({"error": str(exc)}), 500
 
     if row is None:
+        return jsonify({"error": "Message not found"}), 404
+
+    raw = row["raw"]
+
+    # Verify the content_id exists in this message's attachments
+    atts = _get_attachments(message_id, raw)
+    att_meta = next((a for a in atts if a.get("content_id") == content_id), None)
+    if att_meta is None:
         return jsonify({"error": "Inline image not found"}), 404
 
-    attachment_id = row["attachment_id"]
-    mime_type = row["mime_type"]
-    filename = row["filename"] or "image"
-    msg_id = message_id or row["message_id"]
+    data = extract_attachment_by_content_id(raw, content_id)
+    if data is None:
+        return jsonify({"error": "Inline image data not available"}), 404
 
-    def _make_cid_response(data):
-        resp = make_response(data)
-        resp.headers["Content-Type"] = mime_type
-        resp.headers["Content-Disposition"] = "inline"
-        return resp
-
-    # 1. Try extracting from the stored raw RFC 2822 source by Content-ID
-    try:
-        raw_row = db.execute(
-            "SELECT raw FROM messages WHERE message_id = ?", (msg_id,)
-        ).fetchone()
-        if raw_row and raw_row["raw"]:
-            data = extract_attachment_by_content_id(raw_row["raw"], content_id)
-            if data:
-                return _make_cid_response(data)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"Could not extract cid image from raw for {msg_id}/{content_id}: {exc}")
-
-    # 2. Last resort — fetch from Gmail API on demand
-    try:
-        data = _fetch_attachment_from_gmail(msg_id, attachment_id, filename)
-    except Exception as exc:  # noqa: BLE001
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": f"Could not fetch inline image: {exc}"}), 502
-
-    return _make_cid_response(data)
+    from flask import make_response
+    resp = make_response(data)
+    resp.headers["Content-Type"] = att_meta["mime_type"]
+    resp.headers["Content-Disposition"] = "inline"
+    return resp

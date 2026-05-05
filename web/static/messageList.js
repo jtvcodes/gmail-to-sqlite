@@ -1,12 +1,8 @@
 // Message list component for the Arkchive SPA
 // Renders the paginated message table into #message-list.
 
-/**
- * Returns the best available display date for a message.
- * Prefers received_date; falls back to timestamp.
- */
 function getDisplayDate(msg) {
-  return msg.received_date || msg.timestamp;
+  return msg.timestamp;
 }
 
 function render() {
@@ -113,13 +109,13 @@ function render() {
 
     const subjectCell = document.createElement("td");
     subjectCell.textContent = message.subject || "(no subject)";
-    if (message.has_attachments) {
+    if (message.attachment_count && message.attachment_count > 0) {
       const clip = document.createElement("span");
       clip.textContent = " 📎";
       clip.title = "View attachments";
       clip.className = "attachment-clip";
       clip.addEventListener("click", function (e) {
-        e.stopPropagation(); // don't open the message
+        e.stopPropagation();
         openAttachmentPopover(clip, message.message_id);
       });
       subjectCell.appendChild(clip);

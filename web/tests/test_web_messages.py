@@ -23,7 +23,6 @@ CREATE TABLE messages (
     subject       TEXT,
     body          TEXT,
     raw           TEXT,
-    received_date DATETIME,
     size          INTEGER,
     timestamp     DATETIME,
     is_read       INTEGER,
@@ -33,21 +32,7 @@ CREATE TABLE messages (
 )
 """
 
-CREATE_ATTACHMENTS_TABLE_SQL = """
-CREATE TABLE attachments (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    message_id    TEXT NOT NULL REFERENCES messages(message_id),
-    filename      TEXT,
-    mime_type     TEXT NOT NULL,
-    size          INTEGER NOT NULL DEFAULT 0,
-    data          BLOB,
-    attachment_id TEXT,
-    content_id    TEXT
-)
-"""
-
 SEED_ROWS = [
-    # (message_id, thread_id, sender, recipients, labels, subject, body, size, timestamp, is_read, is_outgoing, is_deleted)
     (
         "msg1", "thread1",
         '{"name": "Alice", "email": "alice@example.com"}',
@@ -140,15 +125,14 @@ def _seed_db(path: str) -> None:
     """Create and seed the messages table in the SQLite file at *path*."""
     conn = sqlite3.connect(path)
     conn.execute(CREATE_TABLE_SQL)
-    conn.execute(CREATE_ATTACHMENTS_TABLE_SQL)
     conn.executemany(
-        "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, subject, body, raw, received_date, size, timestamp, is_read, is_outgoing, is_deleted, last_indexed) "
-        "VALUES (?,?,?,?,?,?,?,NULL,NULL,?,?,?,?,?,NULL)",
+        "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, subject, body, raw, size, timestamp, is_read, is_outgoing, is_deleted, last_indexed) "
+        "VALUES (?,?,?,?,?,?,?,NULL,?,?,?,?,?,NULL)",
         SEED_ROWS,
     )
     conn.executemany(
-        "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, subject, body, raw, received_date, size, timestamp, is_read, is_outgoing, is_deleted, last_indexed) "
-        "VALUES (?,?,?,?,?,?,?,?,NULL,?,?,?,?,?,NULL)",
+        "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, subject, body, raw, size, timestamp, is_read, is_outgoing, is_deleted, last_indexed) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
         SEED_ROWS_WITH_HTML,
     )
     conn.commit()
@@ -476,46 +460,116 @@ class TestBodyHtml:
 
 
 # ---------------------------------------------------------------------------
+# RFC 2822 raw messages used by attachment tests
+# ---------------------------------------------------------------------------
+
+import base64 as _base64
+
+_ATTACH_BYTES = b"FAKE PDF CONTENT"
+_ATTACH_B64 = _base64.b64encode(_ATTACH_BYTES).decode("ascii")
+
+_IMAGE_BYTES = b"\x89PNG\r\nFAKE IMAGE DATA"
+_IMAGE_B64 = _base64.b64encode(_IMAGE_BYTES).decode("ascii")
+
+# Multipart/mixed with a PDF attachment
+_RAW_WITH_ATTACHMENT = (
+    "MIME-Version: 1.0\r\n"
+    "From: sender@example.com\r\n"
+    "To: recipient@example.com\r\n"
+    "Subject: Message with attachment\r\n"
+    "Date: Fri, 05 Jan 2024 05:00:00 +0000\r\n"
+    "Content-Type: multipart/mixed; boundary=\"mix1\"\r\n"
+    "\r\n"
+    "--mix1\r\n"
+    "Content-Type: text/plain; charset=\"utf-8\"\r\n"
+    "\r\n"
+    "See attached file.\r\n"
+    "--mix1\r\n"
+    "Content-Type: application/pdf\r\n"
+    "Content-Disposition: attachment; filename=\"report.pdf\"\r\n"
+    "Content-Transfer-Encoding: base64\r\n"
+    "\r\n"
+    f"{_ATTACH_B64}\r\n"
+    "--mix1--\r\n"
+)
+
+# Multipart/related with an inline PNG image (Content-ID)
+_RAW_WITH_CID_IMAGE = (
+    "MIME-Version: 1.0\r\n"
+    "From: sender@example.com\r\n"
+    "To: recipient@example.com\r\n"
+    "Subject: Message with inline image\r\n"
+    "Date: Thu, 04 Jan 2024 04:00:00 +0000\r\n"
+    "Content-Type: multipart/related; boundary=\"rel1\"\r\n"
+    "\r\n"
+    "--rel1\r\n"
+    "Content-Type: text/html; charset=\"utf-8\"\r\n"
+    "\r\n"
+    "<html><body><img src=\"cid:inline_img_001\"/></body></html>\r\n"
+    "--rel1\r\n"
+    "Content-Type: image/png\r\n"
+    "Content-ID: <inline_img_001>\r\n"
+    "Content-Disposition: inline; filename=\"logo.png\"\r\n"
+    "Content-Transfer-Encoding: base64\r\n"
+    "\r\n"
+    f"{_IMAGE_B64}\r\n"
+    "--rel1--\r\n"
+)
+
+
+def _make_db_with_raw(tmp_path, message_id: str, raw: str) -> str:
+    """Create a minimal DB with a single message that has the given raw source."""
+    path = str(tmp_path / f"{message_id}.db")
+    conn = sqlite3.connect(path)
+    conn.execute(CREATE_TABLE_SQL)
+    conn.execute(
+        "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, "
+        "subject, body, raw, size, timestamp, is_read, is_outgoing, is_deleted, last_indexed) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,0,0,0,NULL)",
+        (
+            message_id, "thread_x",
+            '{"name": "Sender", "email": "sender@example.com"}',
+            '{"to": ["recipient@example.com"], "cc": [], "bcc": []}',
+            '["INBOX"]',
+            "Test subject", "Test body",
+            raw, len(raw), "2024-01-05T05:00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+# ---------------------------------------------------------------------------
 # 17.1–17.5 — Attachment Web API tests
 # ---------------------------------------------------------------------------
 
 class TestAttachmentWebAPI:
-    """Tests for attachment-related endpoints on GET /api/messages/<id>
-    and GET /api/messages/<id>/attachments/<aid>/data."""
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def _seed_attachments(self, db_path: str) -> None:
-        """Insert attachment rows into the test database."""
-        conn = sqlite3.connect(db_path)
-        # Attachment with non-null data for msg1
-        conn.execute(
-            "INSERT INTO attachments (message_id, filename, mime_type, size, data, attachment_id) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ("msg1", "report.pdf", "application/pdf", 1024, b"PDF binary content", "att_001"),
-        )
-        # Second attachment for msg1 (no data — large attachment)
-        conn.execute(
-            "INSERT INTO attachments (message_id, filename, mime_type, size, data, attachment_id) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ("msg1", "photo.jpg", "image/jpeg", 2048, None, "att_002"),
-        )
-        conn.commit()
-        conn.close()
+    """Tests for attachment-related endpoints derived from raw RFC 2822 source."""
 
     @pytest.fixture
-    def db_path_with_attachments(self, db_path):
-        """Return a seeded DB path that also has attachment rows for msg1."""
-        self._seed_attachments(db_path)
-        return db_path
+    def client_with_attachment(self, tmp_path):
+        """Flask test client for a message that has a PDF attachment in raw."""
+        path = _make_db_with_raw(tmp_path, "msg_att", _RAW_WITH_ATTACHMENT)
+        flask_app = create_app(db_path=path)
+        flask_app.config["TESTING"] = True
+        return flask_app.test_client()
 
     @pytest.fixture
-    def client_with_attachments(self, db_path_with_attachments):
-        """Flask test client backed by a DB that has attachment rows."""
-        from web.server import create_app
-        flask_app = create_app(db_path=db_path_with_attachments)
+    def client_no_attachment(self, tmp_path):
+        """Flask test client for a plain-text message with no attachments."""
+        raw = (
+            "MIME-Version: 1.0\r\n"
+            "From: a@example.com\r\n"
+            "To: b@example.com\r\n"
+            "Subject: Plain\r\n"
+            "Date: Fri, 05 Jan 2024 05:00:00 +0000\r\n"
+            "Content-Type: text/plain; charset=\"utf-8\"\r\n"
+            "\r\n"
+            "Just text.\r\n"
+        )
+        path = _make_db_with_raw(tmp_path, "msg_plain", raw)
+        flask_app = create_app(db_path=path)
         flask_app.config["TESTING"] = True
         return flask_app.test_client()
 
@@ -523,92 +577,80 @@ class TestAttachmentWebAPI:
     # 17.1 — attachments array shape for a message WITH attachments
     # ------------------------------------------------------------------
 
-    def test_attachments_array_shape_with_attachments(self, client_with_attachments):
-        """17.1 — GET /api/messages/<id> returns attachments array with correct
-        shape (filename, mime_type, size, attachment_id present; no data key)."""
-        resp = client_with_attachments.get("/api/messages/msg1")
+    def test_attachments_array_shape_with_attachments(self, client_with_attachment):
+        """17.1 — GET /api/messages/<id> returns attachments array with correct shape."""
+        resp = client_with_attachment.get("/api/messages/msg_att")
         assert resp.status_code == 200
         data = resp.get_json()
 
         assert "attachments" in data
         assert isinstance(data["attachments"], list)
-        assert len(data["attachments"]) == 2
+        assert len(data["attachments"]) == 1
 
-        for item in data["attachments"]:
-            assert "filename" in item, "Missing 'filename' key"
-            assert "mime_type" in item, "Missing 'mime_type' key"
-            assert "size" in item, "Missing 'size' key"
-            assert "attachment_id" in item, "Missing 'attachment_id' key"
-            assert "data" not in item, "Response must NOT contain 'data' key"
+        item = data["attachments"][0]
+        assert "filename" in item, "Missing 'filename' key"
+        assert "mime_type" in item, "Missing 'mime_type' key"
+        assert "size" in item, "Missing 'size' key"
+        assert "attachment_id" in item, "Missing 'attachment_id' key"
+        assert "data" not in item, "Response must NOT contain 'data' key"
 
-    def test_attachments_array_first_item_values(self, client_with_attachments):
-        """17.1 — Verify the first attachment's field values are correct."""
-        resp = client_with_attachments.get("/api/messages/msg1")
+    def test_attachments_array_first_item_values(self, client_with_attachment):
+        """17.1 — Verify the attachment's field values are correct."""
+        resp = client_with_attachment.get("/api/messages/msg_att")
         data = resp.get_json()
-        items = {a["attachment_id"]: a for a in data["attachments"]}
-
-        att = items["att_001"]
+        att = data["attachments"][0]
         assert att["filename"] == "report.pdf"
         assert att["mime_type"] == "application/pdf"
-        assert att["size"] == 1024
-        assert att["attachment_id"] == "att_001"
+        assert att["size"] == len(_ATTACH_BYTES)
 
     # ------------------------------------------------------------------
     # 17.2 — empty attachments array for a message WITHOUT attachments
     # ------------------------------------------------------------------
 
-    def test_attachments_array_empty_for_message_without_attachments(self, client):
+    def test_attachments_array_empty_for_message_without_attachments(self, client_no_attachment):
         """17.2 — GET /api/messages/<id> returns an empty attachments array
         when the message has no attachments."""
-        # msg2 has no attachment rows in the base seeded DB
-        resp = client.get("/api/messages/msg2")
+        resp = client_no_attachment.get("/api/messages/msg_plain")
         assert resp.status_code == 200
         data = resp.get_json()
-
         assert "attachments" in data
         assert data["attachments"] == []
 
     # ------------------------------------------------------------------
-    # 17.3 — data endpoint returns raw bytes with correct Content-Type
+    # 17.3 — by-filename endpoint returns raw bytes with correct Content-Type
     # ------------------------------------------------------------------
 
-    def test_attachment_data_returns_raw_bytes_and_content_type(self, client_with_attachments):
-        """17.3 — GET /api/messages/<id>/attachments/<aid>/data returns the
-        stored raw bytes with the correct Content-Type header."""
-        resp = client_with_attachments.get("/api/messages/msg1/attachments/att_001/data")
+    def test_attachment_data_returns_raw_bytes_and_content_type(self, client_with_attachment):
+        """17.3 — by-filename endpoint returns the correct bytes and Content-Type."""
+        resp = client_with_attachment.get(
+            "/api/messages/msg_att/attachments/by-filename/report.pdf/data"
+        )
         assert resp.status_code == 200
-        assert resp.data == b"PDF binary content"
+        assert resp.data == _ATTACH_BYTES
         assert resp.content_type == "application/pdf"
 
     # ------------------------------------------------------------------
-    # 17.4 — data endpoint returns 404 when attachment does not exist
+    # 17.4 — by-filename endpoint returns 404 for unknown filename
     # ------------------------------------------------------------------
 
-    def test_attachment_data_404_when_attachment_not_found(self, client_with_attachments):
-        """17.4 — GET /api/messages/<id>/attachments/<aid>/data returns HTTP 404
-        when the attachment_id does not exist."""
-        resp = client_with_attachments.get("/api/messages/msg1/attachments/nonexistent_id/data")
+    def test_attachment_data_404_when_attachment_not_found(self, client_with_attachment):
+        """17.4 — by-filename endpoint returns HTTP 404 for an unknown filename."""
+        resp = client_with_attachment.get(
+            "/api/messages/msg_att/attachments/by-filename/nonexistent.xyz/data"
+        )
         assert resp.status_code == 404
 
     # ------------------------------------------------------------------
-    # 17.5 — data endpoint returns 404 when attachment data is NULL
+    # 17.5 — attachment_count in list response reflects raw-parsed count
     # ------------------------------------------------------------------
 
-    def test_attachment_data_404_when_data_is_null(self, client_with_attachments):
-        """17.5 — GET /api/messages/<id>/attachments/<aid>/data returns HTTP 404
-        with an appropriate error message when the attachment's data is NULL."""
-        from unittest.mock import patch
-        # Mock the Gmail API fetch to raise an error (simulating no credentials/network)
-        # The test verifies that when data is NULL and Gmail fetch fails, we get 404
-        with patch("web.api.messages._fetch_attachment_from_gmail") as mock_fetch:
-            mock_fetch.side_effect = Exception("No credentials available in test environment")
-            resp = client_with_attachments.get("/api/messages/msg1/attachments/att_002/data")
-        # When data is NULL and Gmail fetch fails, the API returns 502
-        # The test verifies the response is not 200 (data is not available)
-        assert resp.status_code in (404, 502), (
-            f"Expected 404 or 502 when attachment data is NULL and Gmail fetch fails, "
-            f"got {resp.status_code}"
-        )
+    def test_attachment_count_in_list_response(self, client_with_attachment):
+        """17.5 — GET /api/messages list includes attachment_count derived from raw."""
+        resp = client_with_attachment.get("/api/messages")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        msg = next(m for m in data["messages"] if m["message_id"] == "msg_att")
+        assert msg["attachment_count"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -641,8 +683,8 @@ class TestMessagesStats:
         # Insert 4 non-deleted messages and 1 deleted message
         conn.executemany(
             "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, "
-            "subject, body, raw, received_date, size, timestamp, is_read, is_outgoing, "
-            "is_deleted, last_indexed) VALUES (?,?,?,?,?,?,?,NULL,NULL,0,NULL,0,0,?,NULL)",
+            "subject, body, raw, size, timestamp, is_read, is_outgoing, "
+            "is_deleted, last_indexed) VALUES (?,?,?,?,?,?,?,NULL,0,NULL,0,0,?,NULL)",
             [
                 ("m1", "t1", "{}", "{}", "[]", "s1", "b1", 0),
                 ("m2", "t2", "{}", "{}", "[]", "s2", "b2", 0),
@@ -686,8 +728,8 @@ class TestMessagesStats:
         # Insert 3 non-deleted messages
         conn.executemany(
             "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, "
-            "subject, body, raw, received_date, size, timestamp, is_read, is_outgoing, "
-            "is_deleted, last_indexed) VALUES (?,?,?,?,?,?,?,NULL,NULL,0,NULL,0,0,0,NULL)",
+            "subject, body, raw, size, timestamp, is_read, is_outgoing, "
+            "is_deleted, last_indexed) VALUES (?,?,?,?,?,?,?,NULL,0,NULL,0,0,0,NULL)",
             [("a1", "t1", "{}", "{}", "[]", "s1", "b1"),
              ("a2", "t2", "{}", "{}", "[]", "s2", "b2"),
              ("a3", "t3", "{}", "{}", "[]", "s3", "b3")],
@@ -735,145 +777,15 @@ class TestMessagesStats:
 # 13.1–13.3 — by-filename attachment endpoint tests
 # ---------------------------------------------------------------------------
 
-import base64 as _base64
-
-# Minimal RFC 2822 multipart/mixed message with a PDF attachment.
-# The attachment payload is base64-encoded so get_payload(decode=True) works.
-_ATTACH_BYTES = b"FAKE PDF CONTENT"
-_ATTACH_B64 = _base64.b64encode(_ATTACH_BYTES).decode("ascii")
-
-_MULTIPART_WITH_ATTACHMENT = (
-    "MIME-Version: 1.0\r\n"
-    "From: sender@example.com\r\n"
-    "To: recipient@example.com\r\n"
-    "Subject: Message with attachment\r\n"
-    "Date: Mon, 05 Jan 2024 05:00:00 +0000\r\n"
-    "Content-Type: multipart/mixed; boundary=\"att_boundary\"\r\n"
-    "\r\n"
-    "--att_boundary\r\n"
-    "Content-Type: text/plain; charset=\"utf-8\"\r\n"
-    "\r\n"
-    "See attached file.\r\n"
-    "--att_boundary\r\n"
-    "Content-Type: application/pdf\r\n"
-    "Content-Disposition: attachment; filename=\"report.pdf\"\r\n"
-    "Content-Transfer-Encoding: base64\r\n"
-    "\r\n"
-    f"{_ATTACH_B64}\r\n"
-    "--att_boundary--\r\n"
-)
-
-# Minimal RFC 2822 multipart/related message with an inline PNG image.
-_IMAGE_BYTES = b"\x89PNG\r\nFAKE IMAGE DATA"
-_IMAGE_B64 = _base64.b64encode(_IMAGE_BYTES).decode("ascii")
-
-_MULTIPART_WITH_CID_IMAGE = (
-    "MIME-Version: 1.0\r\n"
-    "From: sender@example.com\r\n"
-    "To: recipient@example.com\r\n"
-    "Subject: Message with inline image\r\n"
-    "Date: Mon, 05 Jan 2024 05:00:00 +0000\r\n"
-    "Content-Type: multipart/related; boundary=\"cid_boundary\"\r\n"
-    "\r\n"
-    "--cid_boundary\r\n"
-    "Content-Type: text/html; charset=\"utf-8\"\r\n"
-    "\r\n"
-    "<html><body><img src=\"cid:inline_img_001\"></body></html>\r\n"
-    "--cid_boundary\r\n"
-    "Content-Type: image/png\r\n"
-    "Content-ID: <inline_img_001>\r\n"
-    "Content-Disposition: inline; filename=\"logo.png\"\r\n"
-    "Content-Transfer-Encoding: base64\r\n"
-    "\r\n"
-    f"{_IMAGE_B64}\r\n"
-    "--cid_boundary--\r\n"
-)
-
 
 class TestByFilenameAttachment:
-    """Tests for GET /api/messages/<id>/attachments/by-filename/<filename>/data
-    (Requirements 4.4)."""
-
-    # ------------------------------------------------------------------
-    # Fixtures
-    # ------------------------------------------------------------------
+    """Tests for GET /api/messages/<id>/attachments/by-filename/<filename>/data."""
 
     @pytest.fixture
-    def db_path_raw_attach(self, tmp_path):
-        """DB with a message whose raw source contains a PDF attachment."""
-        path = str(tmp_path / "raw_attach.db")
-        conn = sqlite3.connect(path)
-        conn.execute(CREATE_TABLE_SQL)
-        conn.execute(CREATE_ATTACHMENTS_TABLE_SQL)
-        # Insert the message with raw RFC 2822 source
-        conn.execute(
-            "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, "
-            "subject, body, raw, received_date, size, timestamp, is_read, is_outgoing, "
-            "is_deleted, last_indexed) VALUES (?,?,?,?,?,?,?,?,NULL,?,?,0,0,0,NULL)",
-            (
-                "msg_raw_attach", "thread_raw_attach",
-                '{"name": "Sender", "email": "sender@example.com"}',
-                '{"to": ["recipient@example.com"], "cc": [], "bcc": []}',
-                '["INBOX"]',
-                "Message with attachment",
-                "See attached file.",
-                _MULTIPART_WITH_ATTACHMENT,
-                len(_MULTIPART_WITH_ATTACHMENT),
-                "2024-01-05T05:00:00",
-            ),
-        )
-        # Insert a matching attachments row (no blob data — raw source is the source of truth)
-        conn.execute(
-            "INSERT INTO attachments (message_id, filename, mime_type, size, data, attachment_id) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ("msg_raw_attach", "report.pdf", "application/pdf", len(_ATTACH_BYTES), None, None),
-        )
-        conn.commit()
-        conn.close()
-        return path
-
-    @pytest.fixture
-    def client_raw_attach(self, db_path_raw_attach):
-        from web.server import create_app
-        flask_app = create_app(db_path=db_path_raw_attach)
-        flask_app.config["TESTING"] = True
-        return flask_app.test_client()
-
-    @pytest.fixture
-    def db_path_blob_attach(self, tmp_path):
-        """DB with a message that has a DB blob attachment and no raw source."""
-        path = str(tmp_path / "blob_attach.db")
-        conn = sqlite3.connect(path)
-        conn.execute(CREATE_TABLE_SQL)
-        conn.execute(CREATE_ATTACHMENTS_TABLE_SQL)
-        conn.execute(
-            "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, "
-            "subject, body, raw, received_date, size, timestamp, is_read, is_outgoing, "
-            "is_deleted, last_indexed) VALUES (?,?,?,?,?,?,?,NULL,NULL,?,?,0,0,0,NULL)",
-            (
-                "msg_blob_attach", "thread_blob_attach",
-                '{"name": "Sender", "email": "sender@example.com"}',
-                '{"to": ["recipient@example.com"], "cc": [], "bcc": []}',
-                '["INBOX"]',
-                "Message with blob attachment",
-                "Body text.",
-                100,
-                "2024-01-05T05:00:00",
-            ),
-        )
-        conn.execute(
-            "INSERT INTO attachments (message_id, filename, mime_type, size, data, attachment_id) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ("msg_blob_attach", "data.bin", "application/octet-stream", 8, b"BLOBDATA", None),
-        )
-        conn.commit()
-        conn.close()
-        return path
-
-    @pytest.fixture
-    def client_blob_attach(self, db_path_blob_attach):
-        from web.server import create_app
-        flask_app = create_app(db_path=db_path_blob_attach)
+    def client_raw_attach(self, tmp_path):
+        """Flask test client for a message whose raw source contains a PDF attachment."""
+        path = _make_db_with_raw(tmp_path, "msg_raw_attach", _RAW_WITH_ATTACHMENT)
+        flask_app = create_app(db_path=path)
         flask_app.config["TESTING"] = True
         return flask_app.test_client()
 
@@ -903,29 +815,11 @@ class TestByFilenameAttachment:
         assert resp.content_type == "application/pdf"
 
     # ------------------------------------------------------------------
-    # 13.2 — by-filename DB blob fallback
-    # ------------------------------------------------------------------
-
-    def test_by_filename_blob_fallback_returns_200(self, client_blob_attach):
-        """13.2 — by-filename endpoint returns 200 when falling back to DB blob."""
-        resp = client_blob_attach.get(
-            "/api/messages/msg_blob_attach/attachments/by-filename/data.bin/data"
-        )
-        assert resp.status_code == 200
-
-    def test_by_filename_blob_fallback_correct_bytes(self, client_blob_attach):
-        """13.2 — by-filename endpoint returns the correct blob bytes."""
-        resp = client_blob_attach.get(
-            "/api/messages/msg_blob_attach/attachments/by-filename/data.bin/data"
-        )
-        assert resp.data == b"BLOBDATA"
-
-    # ------------------------------------------------------------------
-    # 13.3 — by-filename 404 for unknown filename
+    # 13.2 — by-filename 404 for unknown filename
     # ------------------------------------------------------------------
 
     def test_by_filename_404_for_unknown_filename(self, client_raw_attach):
-        """13.3 — by-filename endpoint returns 404 when filename does not exist."""
+        """13.2 — by-filename endpoint returns 404 when filename does not exist."""
         resp = client_raw_attach.get(
             "/api/messages/msg_raw_attach/attachments/by-filename/nonexistent.xyz/data"
         )
@@ -933,84 +827,46 @@ class TestByFilenameAttachment:
 
 
 # ---------------------------------------------------------------------------
-# 13.4–13.5 — GET /api/cid/<content_id> tests
+# 13.3–13.4 — GET /api/cid/<content_id> tests
 # ---------------------------------------------------------------------------
 
 
 class TestCidImage:
-    """Tests for GET /api/cid/<content_id> (Requirements 4.6)."""
-
-    # ------------------------------------------------------------------
-    # Fixtures
-    # ------------------------------------------------------------------
+    """Tests for GET /api/cid/<content_id>."""
 
     @pytest.fixture
-    def db_path_cid(self, tmp_path):
-        """DB with a message whose raw source contains an inline image with Content-ID."""
-        path = str(tmp_path / "cid_image.db")
-        conn = sqlite3.connect(path)
-        conn.execute(CREATE_TABLE_SQL)
-        conn.execute(CREATE_ATTACHMENTS_TABLE_SQL)
-        conn.execute(
-            "INSERT INTO messages (message_id, thread_id, sender, recipients, labels, "
-            "subject, body, raw, received_date, size, timestamp, is_read, is_outgoing, "
-            "is_deleted, last_indexed) VALUES (?,?,?,?,?,?,?,?,NULL,?,?,0,0,0,NULL)",
-            (
-                "msg_cid", "thread_cid",
-                '{"name": "Sender", "email": "sender@example.com"}',
-                '{"to": ["recipient@example.com"], "cc": [], "bcc": []}',
-                '["INBOX"]',
-                "Message with inline image",
-                "See inline image.",
-                _MULTIPART_WITH_CID_IMAGE,
-                len(_MULTIPART_WITH_CID_IMAGE),
-                "2024-01-05T05:00:00",
-            ),
-        )
-        # Insert an attachments row with content_id so the endpoint can find the message
-        conn.execute(
-            "INSERT INTO attachments (message_id, filename, mime_type, size, data, "
-            "attachment_id, content_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                "msg_cid", "logo.png", "image/png", len(_IMAGE_BYTES),
-                None, None, "inline_img_001",
-            ),
-        )
-        conn.commit()
-        conn.close()
-        return path
-
-    @pytest.fixture
-    def client_cid(self, db_path_cid):
-        from web.server import create_app
-        flask_app = create_app(db_path=db_path_cid)
+    def client_cid(self, tmp_path):
+        """Flask test client for a message whose raw source contains an inline image."""
+        path = _make_db_with_raw(tmp_path, "msg_cid", _RAW_WITH_CID_IMAGE)
+        flask_app = create_app(db_path=path)
         flask_app.config["TESTING"] = True
         return flask_app.test_client()
 
     # ------------------------------------------------------------------
-    # 13.4 — CID found via raw source
+    # 13.3 — CID found via raw source
     # ------------------------------------------------------------------
 
     def test_cid_found_returns_200(self, client_cid):
-        """13.4 — GET /api/cid/<content_id> returns 200 when the inline image exists."""
+        """13.3 — GET /api/cid/<content_id> returns 200 when the inline image exists."""
         resp = client_cid.get("/api/cid/inline_img_001?msg=msg_cid")
         assert resp.status_code == 200
 
     def test_cid_found_correct_bytes(self, client_cid):
-        """13.4 — GET /api/cid/<content_id> returns the correct image bytes."""
+        """13.3 — GET /api/cid/<content_id> returns the correct image bytes."""
         resp = client_cid.get("/api/cid/inline_img_001?msg=msg_cid")
         assert resp.data == _IMAGE_BYTES
 
     def test_cid_found_correct_content_type(self, client_cid):
-        """13.4 — GET /api/cid/<content_id> returns the correct Content-Type."""
+        """13.3 — GET /api/cid/<content_id> returns the correct Content-Type."""
         resp = client_cid.get("/api/cid/inline_img_001?msg=msg_cid")
         assert resp.content_type == "image/png"
 
     # ------------------------------------------------------------------
-    # 13.5 — CID 404 for unknown content_id
+    # 13.4 — CID 404 for unknown content_id
     # ------------------------------------------------------------------
 
     def test_cid_404_for_unknown_content_id(self, client_cid):
-        """13.5 — GET /api/cid/<content_id> returns 404 when content_id is not in DB."""
-        resp = client_cid.get("/api/cid/nonexistent_cid_xyz")
+        """13.4 — GET /api/cid/<content_id> returns 404 for an unknown content_id."""
+        resp = client_cid.get("/api/cid/nonexistent_cid?msg=msg_cid")
         assert resp.status_code == 404
+

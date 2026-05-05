@@ -38,6 +38,7 @@ function renderError() {
 // Track whether a sync subprocess is actively running.
 // Prevents loadMessages() from re-enabling the sync buttons mid-sync.
 let _syncActive = false;
+let _syncStopped = false;
 
 function setSyncActive(active) {
   _syncActive = active;
@@ -53,21 +54,9 @@ function setSyncActive(active) {
 }
 
 function setLoading(on, label) {
-  const overlay = document.getElementById("loading-overlay");
   const bar = document.getElementById("filter-bar");
-  const lbl = document.getElementById("loading-label");
-  const restoreTab = document.getElementById("sync-restore-tab");
-  const minimizeBtn = document.getElementById("sync-minimize-btn");
   if (on) {
-    if (lbl) lbl.textContent = label || "";
-    // Only show overlay if not currently minimized
-    if (!overlay.dataset.minimized) {
-      overlay.removeAttribute("hidden");
-    }
-    // Minimize button hidden by default — runSync() enables it explicitly
-    if (minimizeBtn) minimizeBtn.setAttribute("hidden", "");
     bar.classList.add("loading");
-    // Only disable sync buttons if a sync isn't already holding them disabled
     if (!_syncActive) {
       const primaryBtn = document.getElementById("sync-primary-btn");
       const toggleBtn = document.getElementById("sync-toggle-btn");
@@ -75,16 +64,7 @@ function setLoading(on, label) {
       if (toggleBtn) toggleBtn.disabled = true;
     }
   } else {
-    // Only fully reset the overlay if we're not in minimized mode.
-    const isMinimized = !!overlay.dataset.minimized;
-    if (!isMinimized) {
-      overlay.setAttribute("hidden", "");
-      if (restoreTab) restoreTab.setAttribute("hidden", "");
-    }
-    if (minimizeBtn) minimizeBtn.setAttribute("hidden", "");
     bar.classList.remove("loading");
-    if (lbl && !isMinimized) lbl.textContent = "";
-    // Only re-enable sync buttons if no sync is running
     if (!_syncActive) {
       const primaryBtn = document.getElementById("sync-primary-btn");
       const toggleBtn = document.getElementById("sync-toggle-btn");
@@ -210,86 +190,47 @@ async function selectMessage(messageId) {
 }
 
 function labelForMode(mode) {
-  if (mode === "delta") return "Syncing new messages…";
-  if (mode === "force") return "Force-syncing all messages…";
-  if (mode === "test") return "Test sync (10k messages)…";
-  return "Syncing missing messages…";
+  if (mode === "new") return "Sync New…";
+  if (mode === "delta") return "Sync All Delta…";
+  if (mode === "force") return "Sync All Forced…";
+  if (mode === "test") return "Sync 10k (test)…";
+  return "Syncing…";
 }
 
 // ---------------------------------------------------------------------------
-// Shared scroll-lock helper — used by both runSync and _reconnectToSync
+// Shared SSE connection helper
 // ---------------------------------------------------------------------------
 
-function _createScrollLock(liveOutput, scrollBtn, liveWrap) {
-  let autoScroll = true;
-  let programmaticScroll = false;
-  let scrollPending = false;
-
-  function isAtBottom() {
-    if (!liveOutput) return true;
-    return liveOutput.scrollHeight - liveOutput.scrollTop - liveOutput.clientHeight < 4;
-  }
-  function setScrollBtn(visible) {
-    if (!scrollBtn) return;
-    if (visible) scrollBtn.removeAttribute("hidden");
-    else scrollBtn.setAttribute("hidden", "");
-  }
-  function onScroll() {
-    if (programmaticScroll) return;
-    if (isAtBottom()) { autoScroll = true; setScrollBtn(false); }
-    else { autoScroll = false; setScrollBtn(true); }
-  }
-  function resumeScroll() {
-    autoScroll = true;
-    setScrollBtn(false);
-    if (liveOutput) {
-      programmaticScroll = true;
-      liveOutput.scrollTop = liveOutput.scrollHeight;
-      requestAnimationFrame(() => { programmaticScroll = false; });
+function _updateSyncStatus(text) {
+  // Update log console header status label
+  const label = document.getElementById("sync-status-label");
+  if (label) {
+    if (text) {
+      label.textContent = text;
+      label.removeAttribute("hidden");
+    } else {
+      label.setAttribute("hidden", "");
     }
   }
-  function scheduleScroll() {
-    if (!autoScroll || scrollPending || !liveOutput) return;
-    scrollPending = true;
-    requestAnimationFrame(() => {
-      programmaticScroll = true;
-      liveOutput.scrollTop = liveOutput.scrollHeight;
-      scrollPending = false;
-      requestAnimationFrame(() => { programmaticScroll = false; });
-    });
+  // Update sidebar log console button label
+  const btnLabel = document.querySelector("#log-console-btn .sidebar-footer-btn-label");
+  if (btnLabel) {
+    btnLabel.textContent = text ? text : "Log Console";
   }
-
-  if (liveOutput) liveOutput.addEventListener("scroll", onScroll);
-  if (scrollBtn) scrollBtn.addEventListener("click", resumeScroll);
-
-  function cleanup() {
-    if (liveOutput) liveOutput.removeEventListener("scroll", onScroll);
-    if (scrollBtn) scrollBtn.removeEventListener("click", resumeScroll);
-    setScrollBtn(false);
-    if (liveWrap) liveWrap.style.display = "none";
-  }
-
-  return { isAtBottom, setScrollBtn, onScroll, resumeScroll, scheduleScroll, cleanup };
 }
 
-// ---------------------------------------------------------------------------
-// Shared SSE connection helper — used by both runSync and _reconnectToSync
-// ---------------------------------------------------------------------------
-
-// Returns a Promise resolving with { outcome, exitCode, lastLine }
-function _connectToSyncStream(url, liveOutput, scheduleScroll, summaryLines, onProgress) {
+function _connectToSyncStream(url, onProgress) {
   return new Promise((resolve) => {
     const es = new EventSource(url);
     let lastLine = parseInt(new URL(url, location.href).searchParams.get("from") || "0", 10);
 
     es.onmessage = function (event) {
-      if (liveOutput) {
-        liveOutput.appendChild(document.createTextNode(event.data + "\n"));
-        scheduleScroll();
-      }
-      summaryLines.push(event.data);
       if (event.lastEventId) lastLine = parseInt(event.lastEventId) + 1;
       if (onProgress) onProgress(event.data);
+      if (typeof logConsole !== "undefined") logConsole.append(event.data);
+      // Parse STATUS: lines and update UI
+      const statusMatch = event.data.match(/STATUS:\s*(.+)/);
+      if (statusMatch) _updateSyncStatus(statusMatch[1].trim());
     };
     es.addEventListener("done", function (event) {
       es.close();
@@ -306,139 +247,75 @@ function _connectToSyncStream(url, liveOutput, scheduleScroll, summaryLines, onP
   });
 }
 
+async function stopSync() {
+  const btn = document.getElementById("sync-stop-btn");
+  if (btn) { btn.disabled = true; btn.textContent = "Stopping…"; }
+  _syncStopped = true;
+  try { await fetch("/api/sync/stop", { method: "POST" }); } catch (_) {}
+}
+
 async function runSync(mode) {
   closeSyncDropdown();
-
-  // Don't start a second sync if one is already running
   if (_syncActive) return;
 
-  const liveWrap = document.getElementById("sync-live-output-wrap");
-  const liveOutput = document.getElementById("sync-live-output");
-  const scrollBtn = document.getElementById("sync-scroll-btn");
-  const outputPanel = document.getElementById("sync-output-panel");
-  const outputText = document.getElementById("sync-output-text");
-  const overlay = document.getElementById("loading-overlay");
-  const restoreTab = document.getElementById("sync-restore-tab");
-  const restoreLabel = document.getElementById("sync-restore-label");
-  const minimizeBtn = document.getElementById("sync-minimize-btn");
-
-  // Mark sync active — spins the ⇄ icon, disables the dropdown
+  _syncStopped = false;
   setSyncActive(true);
 
-  // Clear log areas
-  if (liveOutput) liveOutput.textContent = "";
-  if (liveWrap) liveWrap.style.display = "block";
-  if (outputText) outputText.textContent = "";
-  if (outputPanel) outputPanel.setAttribute("hidden", "");
-
-  // Start MINIMIZED — overlay stays hidden, restore tab appears immediately
-  overlay.setAttribute("hidden", "");
-  overlay.dataset.minimized = "1";
-  if (minimizeBtn) minimizeBtn.setAttribute("hidden", "");
-  if (restoreTab) {
-    restoreTab.removeAttribute("hidden");
-    if (restoreLabel) restoreLabel.textContent = labelForMode(mode);
+  // Show stop button in log console header, open the console
+  const stopBtn = document.getElementById("sync-stop-btn");
+  if (stopBtn) { stopBtn.removeAttribute("hidden"); stopBtn.disabled = false; stopBtn.textContent = "■ Stop Sync"; }
+  if (typeof logConsole !== "undefined") {
+    logConsole.append(`--- ${labelForMode(mode)} ---`);
+    logConsole.open();
   }
 
-  // Persist sync state so a page refresh can reconnect
-  saveSyncState(mode, true);
+  if (typeof toastManager !== "undefined") toastManager.success(labelForMode(mode));
 
-  // --- Scroll-lock logic (used if user opens the overlay) ---
-  const { scheduleScroll, cleanup } = _createScrollLock(liveOutput, scrollBtn, liveWrap);
-
-  const summaryLines = [];
-  let syncTotal = 0;
-  let syncDone = 0;
-
-  function updateProgressLabel() {
-    const label = syncTotal > 0
-      ? `Syncing ${syncDone} of ${syncTotal}…`
-      : labelForMode(mode);
-    if (restoreLabel) restoreLabel.textContent = label;
-    const lbl = document.getElementById("loading-label");
-    if (lbl) lbl.textContent = label;
-  }
-
-  function _onProgress(line) {
-    const foundMatch = line.match(/Found (\d+) messages? to sync\./);
-    if (foundMatch) { syncTotal = parseInt(foundMatch[1], 10); syncDone = 0; updateProgressLabel(); }
-    if (syncTotal > 0 && /Successfully synced message/.test(line)) {
-      syncDone += 1; updateProgressLabel();
-    }
-  }
-
-  // --- Run with one automatic retry ---
   let result = await _connectToSyncStream(
     `/api/sync/stream?mode=${encodeURIComponent(mode)}&workers=20&from=0`,
-    liveOutput, scheduleScroll, summaryLines, _onProgress
+    null
   );
 
+  // One automatic retry on failure — but not if user stopped it
   const isFailure = result.outcome === "connection_lost" ||
                     result.outcome === "error" ||
                     (result.outcome === "done" && result.exitCode !== 0);
 
-  if (isFailure) {
-    const retryMsg = result.outcome === "connection_lost"
-      ? "Connection lost — retrying…"
-      : "Sync ended unexpectedly — retrying…";
-    if (restoreLabel) restoreLabel.textContent = retryMsg;
-    if (liveOutput) liveOutput.appendChild(document.createTextNode(`\n⚠ ${retryMsg}\n`));
+  if (isFailure && !_syncStopped) {
+    if (typeof logConsole !== "undefined") logConsole.append("⚠ Sync ended unexpectedly — retrying…");
     await new Promise(r => setTimeout(r, 2000));
-    syncTotal = 0; syncDone = 0;
-    if (liveOutput) liveOutput.appendChild(document.createTextNode(`\n--- Retry attempt ---\n`));
     result = await _connectToSyncStream(
       `/api/sync/stream?mode=${encodeURIComponent(mode)}&workers=20&from=${result.lastLine || 0}`,
-      liveOutput, scheduleScroll, summaryLines, _onProgress
+      null
     );
   }
 
-  // --- Finalize ---
-  cleanup();
-  if (outputText) outputText.textContent = summaryLines.join("\n");
+  // Hide stop button
+  if (stopBtn) { stopBtn.setAttribute("hidden", ""); stopBtn.disabled = false; stopBtn.textContent = "■ Stop Sync"; }
+
+  setSyncActive(false);
+  _updateSyncStatus("");
 
   const finalFailure = result.outcome === "connection_lost" ||
                        result.outcome === "error" ||
                        (result.outcome === "done" && result.exitCode !== 0);
 
-  // Always hide the full overlay and clean up minimized state
-  overlay.setAttribute("hidden", "");
-  delete overlay.dataset.minimized;
-  clearSyncState();
-  setSyncActive(false);
-
-  if (finalFailure) {
+  if (finalFailure && !_syncStopped) {
     const failMsg = result.outcome === "connection_lost"
       ? "Lost connection to server during sync."
       : result.msg || "Sync finished with errors.";
-
-    // Hide restore tab
-    if (restoreTab) restoreTab.setAttribute("hidden", "");
-
     state.error = failMsg;
     renderError();
     if (typeof toastManager !== "undefined") toastManager.error(failMsg);
-
-    // Show output panel so user can inspect the log
-    if (outputPanel && outputText && outputText.textContent.trim()) {
-      outputPanel.removeAttribute("hidden");
-      outputPanel.open = true;
-    }
+    if (typeof logConsole !== "undefined") logConsole.append(`✗ ${failMsg}`);
   } else {
-    // Success — refresh the table using the existing refresh animation
     state.error = null;
     renderError();
     const noDbOverlay = document.getElementById("no-db-overlay");
     if (noDbOverlay) noDbOverlay.remove();
-
     if (typeof toastManager !== "undefined") toastManager.success("Sync complete");
-
-    // Reuse refreshMessages() for the post-sync reload (spins ↻, dims table)
+    if (typeof logConsole !== "undefined") logConsole.append("✓ Sync complete");
     await refreshMessages();
-
-    // Close the restore tab a moment after refresh completes
-    setTimeout(function () {
-      if (restoreTab) restoreTab.setAttribute("hidden", "");
-    }, 2000);
   }
 }
 
@@ -563,7 +440,7 @@ function showNoDatabasePrompt() {
 
   const title = document.createElement("h2");
   title.className = "no-db-title";
-  title.textContent = "No database found";
+  title.textContent = "No data found";
 
   const body = document.createElement("p");
   body.className = "no-db-body";
@@ -577,7 +454,7 @@ function showNoDatabasePrompt() {
   syncBtn.textContent = "⟳ Start Sync";
   syncBtn.addEventListener("click", function () {
     overlay.remove();
-    runSync("missing");
+    runSync("new");
   });
 
   const dismissBtn = document.createElement("button");
@@ -643,80 +520,10 @@ state.onFilterChange = function () {
 };
 
 // ---------------------------------------------------------------------------
-// Reconnect to an already-running sync (after page refresh)
-// ---------------------------------------------------------------------------
-
-async function _reconnectToSync(mode) {
-  const liveWrap = document.getElementById("sync-live-output-wrap");
-  const liveOutput = document.getElementById("sync-live-output");
-  const scrollBtn = document.getElementById("sync-scroll-btn");
-  const outputPanel = document.getElementById("sync-output-panel");
-  const outputText = document.getElementById("sync-output-text");
-  const overlay = document.getElementById("loading-overlay");
-
-  if (liveOutput) liveOutput.textContent = "";
-  if (liveWrap) liveWrap.style.display = "block";
-  if (outputText) outputText.textContent = "";
-  if (outputPanel) outputPanel.setAttribute("hidden", "");
-
-  setLoading(true, labelForMode(mode));
-  setSyncActive(true);
-  saveSyncState(mode, false);
-
-  const minimizeBtn = document.getElementById("sync-minimize-btn");
-  if (minimizeBtn) minimizeBtn.removeAttribute("hidden");
-
-  // --- Scroll-lock logic (same as runSync) ---
-  const { scheduleScroll, cleanup } = _createScrollLock(liveOutput, scrollBtn, liveWrap);
-
-  // Plug into the existing stream from line 0 (replay full log)
-  const summaryLines = [];
-  let syncTotal = 0;
-  let syncDone = 0;
-
-  function updateProgressLabel() {
-    const lbl = document.getElementById("loading-label");
-    if (!lbl) return;
-    if (syncTotal > 0) lbl.textContent = `Syncing messages ${syncDone} of ${syncTotal}…`;
-  }
-
-  const url = `/api/sync/stream?mode=${encodeURIComponent(mode)}&workers=20&from=0`;
-
-  const result = await _connectToSyncStream(url, liveOutput, scheduleScroll, summaryLines, function (line) {
-    const foundMatch = line.match(/Found (\d+) messages? to sync\./);
-    if (foundMatch) { syncTotal = parseInt(foundMatch[1], 10); syncDone = 0; updateProgressLabel(); }
-    if (syncTotal > 0 && /Successfully synced message/.test(line)) {
-      syncDone += 1; updateProgressLabel();
-    }
-  });
-
-  cleanup();
-  if (outputText) outputText.textContent = summaryLines.join("\n");
-
-  if (result.outcome === "done" && result.exitCode === 0) {
-    if (outputPanel && outputText && outputText.textContent.trim()) {
-      outputPanel.removeAttribute("hidden");
-      outputPanel.open = false;
-    }
-    loadLabels().then(() => loadMessages()).then(() => loadStats());
-  } else if (result.outcome === "done") {
-    if (outputPanel) { outputPanel.removeAttribute("hidden"); outputPanel.open = true; }
-    state.error = "Sync finished with errors (see output below)";
-    renderError();
-  }
-  // connection_lost / error outcomes: just clean up silently
-  delete overlay.dataset.minimized;
-  clearSyncState();
-  setSyncActive(false);
-  setLoading(false);
-}
-
-// ---------------------------------------------------------------------------
 // Keyboard shortcut reference modal
 // ---------------------------------------------------------------------------
 
 function openShortcutModal() {
-  // Only open once
   if (document.getElementById("shortcut-modal-overlay")) return;
 
   const overlay = document.createElement("div");
@@ -774,7 +581,6 @@ function openShortcutModal() {
   overlay.appendChild(modal);
   document.body.appendChild(overlay);
 
-  // Close on outside click
   overlay.addEventListener("click", function (e) {
     if (e.target === overlay) closeShortcutModal();
   });
@@ -788,15 +594,13 @@ function closeShortcutModal() {
 }
 
 document.addEventListener("DOMContentLoaded", async function () {
-  // ── Initialize modules (before loadLabels) ──────────────────────────────
+  // ── Initialize modules ───────────────────────────────────────────────────
   if (typeof themeManager !== "undefined") themeManager.init();
   if (typeof sidebar !== "undefined") sidebar.init();
   if (typeof readingPane !== "undefined") readingPane.init();
   if (typeof paneResizer !== "undefined") paneResizer.init();
 
   // ── Wire header controls ─────────────────────────────────────────────────
-
-  // Theme toggle
   const themeToggleBtn = document.getElementById("theme-toggle-btn");
   if (themeToggleBtn) {
     themeToggleBtn.addEventListener("click", function () {
@@ -804,7 +608,6 @@ document.addEventListener("DOMContentLoaded", async function () {
     });
   }
 
-  // Density toggle
   const densityToggleBtn = document.getElementById("density-toggle-btn");
   if (densityToggleBtn) {
     densityToggleBtn.addEventListener("click", function () {
@@ -812,14 +615,10 @@ document.addEventListener("DOMContentLoaded", async function () {
     });
   }
 
-  // Reading pane mode selector buttons (toolbar panel dropdown)
-  // Initialise the panel button icon to match the restored mode
   if (typeof readingPane !== "undefined") {
-    const restoredMode = state.readingPaneMode || "right";
-    updatePanelModeBtn(restoredMode);
+    updatePanelModeBtn(state.readingPaneMode || "right");
   }
 
-  // Legacy header reading-pane-btn wiring (kept for any remaining instances)
   document.querySelectorAll(".reading-pane-btn[data-mode]").forEach(function (btn) {
     btn.addEventListener("click", function () {
       const mode = btn.dataset.mode;
@@ -828,32 +627,21 @@ document.addEventListener("DOMContentLoaded", async function () {
     });
   });
 
-  // ── Global keyboard shortcut listener ───────────────────────────────────
+  // ── Global keyboard shortcuts ────────────────────────────────────────────
   document.addEventListener("keydown", function (e) {
     const tag = document.activeElement ? document.activeElement.tagName : "";
     const isEditable = document.activeElement && document.activeElement.isContentEditable;
     const isTextInput = tag === "INPUT" || tag === "TEXTAREA" || isEditable;
 
-    // Cmd/Ctrl+K — always active
     if ((e.metaKey || e.ctrlKey) && e.key === "k") {
       e.preventDefault();
       if (typeof commandPalette !== "undefined") commandPalette.open();
       return;
     }
 
-    // Escape — always active
     if (e.key === "Escape") {
-      // Close shortcut modal if open
-      if (document.getElementById("shortcut-modal-overlay")) {
-        closeShortcutModal();
-        return;
-      }
-      // Close command palette if open
-      if (typeof commandPalette !== "undefined") {
-        commandPalette.close();
-        return;
-      }
-      // Close message detail
+      if (document.getElementById("shortcut-modal-overlay")) { closeShortcutModal(); return; }
+      if (typeof commandPalette !== "undefined") { commandPalette.close(); return; }
       if (state.selectedMessage) {
         state.selectedMessage = null;
         if (typeof messageDetail !== "undefined") messageDetail.render();
@@ -862,7 +650,6 @@ document.addEventListener("DOMContentLoaded", async function () {
       return;
     }
 
-    // Suppress all other shortcuts when a text input is focused
     if (isTextInput) return;
 
     if (e.key === "j" || e.key === "J") {
@@ -872,7 +659,6 @@ document.addEventListener("DOMContentLoaded", async function () {
       if (typeof messageList !== "undefined") messageList.render();
       return;
     }
-
     if (e.key === "k" || e.key === "K") {
       e.preventDefault();
       if (state.messages.length === 0) return;
@@ -880,24 +666,19 @@ document.addEventListener("DOMContentLoaded", async function () {
       if (typeof messageList !== "undefined") messageList.render();
       return;
     }
-
     if (e.key === "o" || e.key === "O" || e.key === "Enter") {
       e.preventDefault();
       if (state.selectedRowIndex >= 0 && state.selectedRowIndex < state.messages.length) {
         const msg = state.messages[state.selectedRowIndex];
-        if (msg && typeof state.onMessageSelect === "function") {
-          state.onMessageSelect(msg.message_id);
-        }
+        if (msg && typeof state.onMessageSelect === "function") state.onMessageSelect(msg.message_id);
       }
       return;
     }
-
     if (e.key === "r" || e.key === "R") {
       e.preventDefault();
-      runSync("delta");
+      runSync("new");
       return;
     }
-
     if (e.key === "?") {
       e.preventDefault();
       openShortcutModal();
@@ -905,67 +686,19 @@ document.addEventListener("DOMContentLoaded", async function () {
     }
   });
 
-  // Minimize / restore sync window
-  const minimizeBtn = document.getElementById("sync-minimize-btn");
-  const restoreTab = document.getElementById("sync-restore-tab");
-  const overlay = document.getElementById("loading-overlay");
-  const restoreLabel = document.getElementById("sync-restore-label");
-
-  if (minimizeBtn) {
-    minimizeBtn.addEventListener("click", function () {
-      overlay.setAttribute("hidden", "");
-      overlay.dataset.minimized = "1";
-      if (restoreTab) restoreTab.removeAttribute("hidden");
-      const savedSync = loadSyncState();
-      if (savedSync) saveSyncState(savedSync.mode, true);
-    });
-  }
-
-  if (restoreTab) {
-    restoreTab.addEventListener("click", function () {
-      const pendingMode = restoreTab.dataset.pendingReconnect;
-      delete restoreTab.dataset.pendingReconnect;
-
-      restoreTab.setAttribute("hidden", "");
-      delete overlay.dataset.minimized;
-
-      if (pendingMode) {
-        // After page refresh — plug into the running sync
-        _reconnectToSync(pendingMode);
-      } else {
-        // Normal restore — just show the overlay again
-        overlay.removeAttribute("hidden");
-        if (minimizeBtn) minimizeBtn.removeAttribute("hidden");
-        const savedSync = loadSyncState();
-        if (savedSync) saveSyncState(savedSync.mode, false);
-      }
-    });
-  }
-
-  // Keep restore tab label in sync with loading-label
-  const loadingLabel = document.getElementById("loading-label");
-  if (loadingLabel && restoreLabel) {
-    const observer = new MutationObserver(function () {
-      restoreLabel.textContent = loadingLabel.textContent || "Syncing…";
-    });
-    observer.observe(loadingLabel, { childList: true, characterData: true, subtree: true });
-  }
-  // Set up keyboard navigation for the sync dropdown
+  // ── Sync dropdown keyboard nav ───────────────────────────────────────────
   const syncDropdown = document.getElementById("sync-dropdown");
   if (syncDropdown) {
     syncDropdown.addEventListener("keydown", function (e) {
       const items = Array.from(syncDropdown.querySelectorAll('[role="menuitem"]'));
       const focused = document.activeElement;
       const currentIndex = items.indexOf(focused);
-
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        const nextIndex = currentIndex < items.length - 1 ? currentIndex + 1 : 0;
-        items[nextIndex].focus();
+        items[currentIndex < items.length - 1 ? currentIndex + 1 : 0].focus();
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
-        const prevIndex = currentIndex > 0 ? currentIndex - 1 : items.length - 1;
-        items[prevIndex].focus();
+        items[currentIndex > 0 ? currentIndex - 1 : items.length - 1].focus();
       } else if (e.key === "Escape") {
         e.preventDefault();
         closeSyncDropdown();
@@ -973,17 +706,12 @@ document.addEventListener("DOMContentLoaded", async function () {
         if (toggleBtn) toggleBtn.focus();
       } else if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
-        if (focused && items.includes(focused)) {
-          if (typeof focused.onclick === "function") {
-            focused.onclick(e);
-          }
-          closeSyncDropdown();
-        }
+        if (focused && items.includes(focused)) { focused.onclick && focused.onclick(e); closeSyncDropdown(); }
       }
     });
   }
 
-  // ── Launch screen progress ───────────────────────────────────────────────
+  // ── Launch screen ────────────────────────────────────────────────────────
   function launchProgress(pct, status) {
     const bar = document.getElementById("launch-progress-bar");
     const lbl = document.getElementById("launch-status");
@@ -995,55 +723,44 @@ document.addEventListener("DOMContentLoaded", async function () {
     const screen = document.getElementById("launch-screen");
     if (screen) {
       screen.classList.add("launch-hidden");
-      // Remove from DOM after transition completes
-      screen.addEventListener("transitionend", function () {
-        screen.remove();
-      }, { once: true });
+      screen.addEventListener("transitionend", function () { screen.remove(); }, { once: true });
     }
   }
 
   launchProgress(10, "Initializing…");
-
   await loadLabels();
   launchProgress(50, "Loading messages…");
-
   await loadMessages();
   launchProgress(85, "Loading stats…");
-
   await loadStats();
   launchProgress(100, "Ready");
-
-  // Brief pause so the 100% bar is visible before fading out
   setTimeout(launchDone, 300);
 
-  // --- Reconnect to in-progress sync after page refresh ---
+  // ── Reconnect to in-progress sync after page refresh ─────────────────────
   try {
     const statusRes = await fetch("/api/sync/status");
     const status = await statusRes.json();
     if (status.running) {
       const mode = status.mode;
-      const savedSync = loadSyncState();
-      const minimized = savedSync && savedSync.mode === mode && savedSync.minimized;
-
-      if (minimized) {
-        // Show restore tab — clicking it will plug into the running sync
-        saveSyncState(mode, true);
-        const restoreTabEl = document.getElementById("sync-restore-tab");
-        const restoreLabelEl = document.getElementById("sync-restore-label");
-        // Use live progress label if available, fall back to mode label
-        if (restoreLabelEl) {
-          restoreLabelEl.textContent = status.progress_label || labelForMode(mode);
-        }
-        if (restoreTabEl) restoreTabEl.removeAttribute("hidden");
-        restoreTabEl.dataset.pendingReconnect = mode;
-      } else {
-        // Show the sync window and plug in immediately
-        _reconnectToSync(mode);
+      if (typeof logConsole !== "undefined") {
+        logConsole.append(`--- Reconnecting to running sync (${mode})… ---`);
       }
-    } else {
-      clearSyncState();
+      setSyncActive(true);
+      const stopBtn = document.getElementById("sync-stop-btn");
+      if (stopBtn) { stopBtn.removeAttribute("hidden"); stopBtn.disabled = false; stopBtn.textContent = "■ Stop Sync"; }
+
+      const result = await _connectToSyncStream(
+        `/api/sync/stream?mode=${encodeURIComponent(mode)}&workers=20&from=0`,
+        null
+      );
+
+      if (stopBtn) { stopBtn.setAttribute("hidden", ""); stopBtn.disabled = false; stopBtn.textContent = "■ Stop Sync"; }
+      setSyncActive(false);
+
+      if (result.outcome === "done" && result.exitCode === 0) {
+        if (typeof logConsole !== "undefined") logConsole.append("✓ Sync complete");
+        await refreshMessages();
+      }
     }
-  } catch (_) {
-    // Status check failed — not critical
-  }
+  } catch (_) {}
 });

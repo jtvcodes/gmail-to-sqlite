@@ -11,24 +11,31 @@ const commandPalette = {
    */
   ACTIONS: [
     {
+      id: "sync-missing",
+      label: "⇄ Sync New",
+      run: () => {
+        if (typeof runSync === "function") runSync("new");
+      },
+    },
+    {
       id: "sync-delta",
-      label: "Sync New Data",
+      label: "⇄ Sync All Delta",
       run: () => {
         if (typeof runSync === "function") runSync("delta");
       },
     },
     {
       id: "sync-force",
-      label: "Force Sync All",
+      label: "⇄ Sync All Forced",
       run: () => {
         if (typeof runSync === "function") runSync("force");
       },
     },
     {
-      id: "sync-missing",
-      label: "Sync Missing",
+      id: "sync-test",
+      label: "⇄ Sync 10k (test)",
       run: () => {
-        if (typeof runSync === "function") runSync("missing");
+        if (typeof runSync === "function") runSync("test");
       },
     },
     {

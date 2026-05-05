@@ -29,7 +29,6 @@ CREATE TABLE messages (
     subject       TEXT,
     body          TEXT,
     raw           TEXT,
-    received_date DATETIME,
     size          INTEGER,
     timestamp     DATETIME,
     is_read       INTEGER,
@@ -78,7 +77,6 @@ def _seed_single_message(path: str, message_id: str, body_html) -> None:
             "Test Subject",
             "plain body",
             None,   # raw (NULL — no raw source stored)
-            None,   # received_date
             100,
             "2024-01-01T12:00:00",
             1,

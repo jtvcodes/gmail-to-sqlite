@@ -37,7 +37,6 @@ CREATE TABLE messages (
     subject       TEXT,
     body          TEXT,
     raw           TEXT,
-    received_date DATETIME,
     size          INTEGER,
     timestamp     DATETIME,
     is_read       INTEGER,

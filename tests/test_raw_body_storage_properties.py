@@ -13,8 +13,8 @@ from hypothesis import given, settings, HealthCheck
 from hypothesis import strategies as st
 from playhouse.sqlite_ext import SqliteDatabase
 
-from gmail_to_sqlite.db import database_proxy, Message, Attachment as DbAttachment, create_message, create_attachments
-from gmail_to_sqlite.message import Message as GmailMessage, Attachment
+from gmail_to_sqlite.db import database_proxy, Message, create_message
+from gmail_to_sqlite.message import Message as GmailMessage
 
 # ---------------------------------------------------------------------------
 # In-memory DB context manager (used inside @given tests)
@@ -26,7 +26,7 @@ def fresh_db():
     """Context manager that provides a fresh in-memory SQLite database."""
     db = SqliteDatabase(":memory:")
     database_proxy.initialize(db)
-    db.create_tables([Message, DbAttachment])
+    db.create_tables([Message])
     try:
         yield db
     finally:
@@ -88,7 +88,6 @@ def _make_stub_message(body_html, message_id=None):
     stub.subject = "Test"
     stub.body = "plain text"
     stub.raw = body_html  # raw replaces body_html
-    stub.received_date = None
     stub.size = 100
     stub.timestamp = datetime(2024, 1, 1, 12, 0, 0)
     stub.is_read = False
@@ -182,182 +181,3 @@ def test_property_3_upsert_updates_body_html(first_html, second_html):
             f"After upsert, expected raw={second_html!r}, got {retrieved.raw!r}"
         )
 
-
-# ---------------------------------------------------------------------------
-# Helpers for attachment tests
-# ---------------------------------------------------------------------------
-
-
-def _make_multipart_payload_with_attachments(attachment_specs: list) -> dict:
-    """Build a minimal Gmail API payload dict with one or more attachment parts.
-
-    Each spec is a dict with keys: mime_type, filename, size, attachment_id.
-    The parts list always starts with a text/plain body part so the message
-    parses cleanly, followed by one part per attachment spec.
-    """
-    parts = [
-        {
-            "mimeType": "text/plain",
-            "body": {
-                "data": base64.urlsafe_b64encode(b"plain text").decode("ascii"),
-                "size": 10,
-            },
-        }
-    ]
-
-    for spec in attachment_specs:
-        part: dict = {
-            "mimeType": spec["mime_type"],
-            "body": {
-                "size": spec["size"],
-            },
-            "headers": [],
-        }
-        if spec["filename"] is not None:
-            part["headers"].append(
-                {
-                    "name": "Content-Disposition",
-                    "value": f'attachment; filename="{spec["filename"]}"',
-                }
-            )
-        if spec["attachment_id"] is not None:
-            part["body"]["attachmentId"] = spec["attachment_id"]
-        parts.append(part)
-
-    return {
-        "id": "msg-attach-test",
-        "threadId": "thread-attach-test",
-        "sizeEstimate": 100,
-        "internalDate": "1700000000000",
-        "labelIds": [],
-        "payload": {
-            "mimeType": "multipart/mixed",
-            "headers": [
-                {"name": "From", "value": "sender@example.com"},
-                {"name": "Subject", "value": "Test with attachments"},
-            ],
-            "parts": parts,
-        },
-    }
-
-
-# Strategy for a single attachment spec dict
-_attachment_spec_st = st.fixed_dictionaries(
-    {
-        "mime_type": st.text(
-            alphabet=st.characters(blacklist_categories=("Cs",)),
-            min_size=1,
-        ).filter(lambda s: s not in ("text/plain", "text/html")),
-        "filename": st.one_of(st.none(), st.text(min_size=1)),
-        "size": st.integers(min_value=0, max_value=10_000_000),
-        "attachment_id": st.one_of(st.none(), st.text(min_size=1)),
-    }
-)
-
-
-# ---------------------------------------------------------------------------
-# Property 6 — Attachment extraction completeness
-# Validates: Requirements 6.1, 6.3
-# ---------------------------------------------------------------------------
-
-
-@given(attachment_specs=st.lists(_attachment_spec_st, min_size=1, max_size=10))
-@settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
-def test_property_6_attachment_extraction_completeness(attachment_specs):
-    """Feature: raw-body-storage, Property 6: Attachment extraction completeness
-
-    For any multipart payload with one or more attachment parts,
-    Message.from_raw produces an attachments list with one entry per part,
-    each having the correct filename, mime_type, size, and attachment_id.
-
-    **Validates: Requirements 6.1, 6.3**
-    """
-    raw = _make_multipart_payload_with_attachments(attachment_specs)
-    msg = GmailMessage.from_raw(raw, labels={})
-
-    assert len(msg.attachments) == len(attachment_specs), (
-        f"Expected {len(attachment_specs)} attachments, got {len(msg.attachments)}"
-    )
-
-    for i, (attachment, spec) in enumerate(zip(msg.attachments, attachment_specs)):
-        assert attachment.mime_type == spec["mime_type"], (
-            f"Attachment {i}: expected mime_type={spec['mime_type']!r}, "
-            f"got {attachment.mime_type!r}"
-        )
-        assert attachment.size == spec["size"], (
-            f"Attachment {i}: expected size={spec['size']}, got {attachment.size}"
-        )
-        assert attachment.filename == spec["filename"], (
-            f"Attachment {i}: expected filename={spec['filename']!r}, "
-            f"got {attachment.filename!r}"
-        )
-        assert attachment.attachment_id == spec["attachment_id"], (
-            f"Attachment {i}: expected attachment_id={spec['attachment_id']!r}, "
-            f"got {attachment.attachment_id!r}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Property 7 — Attachment storage round-trip
-# Validates: Requirements 7.2
-# ---------------------------------------------------------------------------
-
-# Strategy for a single Attachment dataclass instance
-_attachment_st = st.builds(
-    Attachment,
-    filename=st.one_of(st.none(), st.text()),
-    mime_type=st.text(min_size=1),
-    size=st.integers(min_value=0, max_value=10_000_000),
-    data=st.one_of(st.none(), st.binary()),
-    attachment_id=st.one_of(st.none(), st.text()),
-)
-
-
-@given(attachments=st.lists(_attachment_st, min_size=0, max_size=10))
-@settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
-def test_property_7_attachment_storage_round_trip(attachments):
-    """Feature: raw-body-storage, Property 7: Attachment storage round-trip
-
-    For any list of Attachment objects saved via create_attachments, querying
-    the DB returns rows with matching field values.
-
-    **Validates: Requirements 7.2**
-    """
-    with fresh_db():
-        # We need a parent message row for the FK constraint
-        message_id = str(uuid.uuid4())
-        stub = _make_stub_message(body_html=None, message_id=message_id)
-        stub.attachments = []  # don't insert attachments via create_message
-        create_message(stub)
-
-        # Now store the generated attachments
-        create_attachments(message_id, attachments)
-
-        # Query back
-        rows = list(
-            DbAttachment.select().where(DbAttachment.message_id == message_id)
-        )
-
-        assert len(rows) == len(attachments), (
-            f"Expected {len(attachments)} rows, got {len(rows)}"
-        )
-
-        for i, (row, original) in enumerate(zip(rows, attachments)):
-            assert row.filename == original.filename, (
-                f"Row {i}: expected filename={original.filename!r}, got {row.filename!r}"
-            )
-            assert row.mime_type == original.mime_type, (
-                f"Row {i}: expected mime_type={original.mime_type!r}, got {row.mime_type!r}"
-            )
-            assert row.size == original.size, (
-                f"Row {i}: expected size={original.size}, got {row.size}"
-            )
-            assert row.attachment_id == original.attachment_id, (
-                f"Row {i}: expected attachment_id={original.attachment_id!r}, "
-                f"got {row.attachment_id!r}"
-            )
-            # Compare data: BlobField returns bytes or None
-            stored_data = bytes(row.data) if row.data is not None else None
-            assert stored_data == original.data, (
-                f"Row {i}: expected data={original.data!r}, got {stored_data!r}"
-            )

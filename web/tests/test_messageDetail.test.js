@@ -14,8 +14,6 @@
  *   - Source_Modal closes on Escape (Req 8.5)
  *   - Source_Modal closes on backdrop click (Req 8.6)
  *   - <pre> contains raw string (Req 8.1)
- *   - detail panel shows "Received:" label when msg.received_date non-null (Req 12.3, 12.5)
- *   - detail panel shows "Date:" label when msg.received_date null (Req 12.6)
  */
 
 "use strict";
@@ -108,7 +106,6 @@ function makeMsg(overrides) {
       recipients: { to: [], cc: [], bcc: [] },
       labels: [],
       timestamp: "2024-01-15T10:00:00Z",
-      received_date: null,
       raw: null,
       attachments: [],
       body: "Hello",
@@ -162,13 +159,9 @@ function renderMsg(msg) {
   fromLine.textContent = "From: " + (sender.name || "") + " <" + (sender.email || "") + ">";
   meta.appendChild(fromLine);
 
-  // Date line — conditional on received_date
+  // Date line 
   const dateLine = document.createElement("div");
-  if (msg.received_date != null) {
-    dateLine.textContent = "Received: " + new Date(msg.received_date).toLocaleString();
-  } else {
-    dateLine.textContent = "Date: " + (msg.timestamp ? new Date(msg.timestamp).toLocaleString() : "");
-  }
+  dateLine.textContent = "Date: " + (msg.timestamp ? new Date(msg.timestamp).toLocaleString() : "");
   meta.appendChild(dateLine);
 
   // Gmail link
@@ -403,44 +396,3 @@ describe("Unit tests: Source_Modal <pre> contains raw string", () => {
   });
 });
 
-describe("Unit tests: detail panel date label", () => {
-  test("detail panel shows 'Received:' label when msg.received_date is non-null", () => {
-    const receivedDate = "2024-01-15T12:30:00Z";
-    const msg = makeMsg({ received_date: receivedDate, timestamp: "2024-01-10T08:00:00Z" });
-    const panel = renderMsg(msg);
-
-    const meta = panel.querySelector(".detail-meta");
-    expect(meta).not.toBeNull();
-
-    // Find the date line — it should start with "Received:"
-    const divs = Array.from(meta.querySelectorAll("div"));
-    const dateDivs = divs.filter((d) => d.textContent.startsWith("Received:") || d.textContent.startsWith("Date:"));
-    expect(dateDivs.length).toBeGreaterThan(0);
-    expect(dateDivs[0].textContent).toMatch(/^Received:/);
-  });
-
-  test("detail panel shows 'Date:' label when msg.received_date is null", () => {
-    const msg = makeMsg({ received_date: null, timestamp: "2024-01-10T08:00:00Z" });
-    const panel = renderMsg(msg);
-
-    const meta = panel.querySelector(".detail-meta");
-    expect(meta).not.toBeNull();
-
-    const divs = Array.from(meta.querySelectorAll("div"));
-    const dateDivs = divs.filter((d) => d.textContent.startsWith("Received:") || d.textContent.startsWith("Date:"));
-    expect(dateDivs.length).toBeGreaterThan(0);
-    expect(dateDivs[0].textContent).toMatch(/^Date:/);
-  });
-
-  test("detail panel shows 'Date:' label when msg.received_date is undefined", () => {
-    const msg = makeMsg({ timestamp: "2024-01-10T08:00:00Z" });
-    delete msg.received_date;
-    const panel = renderMsg(msg);
-
-    const meta = panel.querySelector(".detail-meta");
-    const divs = Array.from(meta.querySelectorAll("div"));
-    const dateDivs = divs.filter((d) => d.textContent.startsWith("Received:") || d.textContent.startsWith("Date:"));
-    expect(dateDivs.length).toBeGreaterThan(0);
-    expect(dateDivs[0].textContent).toMatch(/^Date:/);
-  });
-});
